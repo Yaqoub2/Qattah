@@ -10,7 +10,7 @@ const plexAr = IBM_Plex_Sans_Arabic({ subsets: ["arabic"], weight: ["400", "600"
 
 export const metadata = {
   title: "قطة | Qattah",
-  description: "Group expenses, fair shares / مصاريف المجموعة بالعدل",
+  description: "Split it, don't drag it out / قطّ ولا تمطّ",
   manifest: "/manifest.webmanifest",
   icons: { icon: "/icon.svg", apple: "/icon.svg" },
 };
