@@ -1,5 +1,4 @@
 # Netlify detects Next.js and adds its runtime (server routes run as functions).
-# Run migrations from your machine with DIRECT_URL before deploying schema changes.
 [build]
   command = "npm run build"
   publish = ".next"
@@ -7,3 +6,8 @@
 [build.environment]
   NODE_VERSION = "22"
   PRISMA_CONNECTION_LIMIT = "1"
+
+# Production deploys (pushes to the production branch): apply migrations through DIRECT_URL,
+# build, then point the Telegram bot at this site. Deploy previews only build.
+[context.production]
+  command = "npx prisma migrate deploy && npm run build && node scripts/set-telegram-webhook.mjs"

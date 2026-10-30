@@ -13,7 +13,8 @@
     "db:down": "docker compose down",
     "db:migrate": "prisma migrate deploy",
     "db:reset": "prisma migrate reset",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "telegram:poll": "node --env-file=.env scripts/telegram-poll.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",

@@ -125,49 +125,48 @@ curl -X POST "$SUPABASE_URL/storage/v1/bucket" \
 
 Or create it in the dashboard under **Storage → New bucket**, with "Public" turned off. Keep the `service_role` key server-side only. It is never sent to the browser.
 
-## Deploy: Netlify
+## Deploy: Netlify (builds from GitHub)
+
+One-time setup:
+
+1. In Netlify: **Add new site → Import an existing project → GitHub**, pick this repository, and set the production branch to `main`. The build settings come from `netlify.toml`.
+2. In **Site configuration → Environment variables**, add:
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | Supabase transaction pooler, port 6543, ending in `?pgbouncer=true` |
+| `DIRECT_URL` | Supabase session pooler, port 5432 (used by migrations during the build) |
+| `SESSION_SECRET` | output of `openssl rand -hex 32` |
+| `APP_URL` | `https://YOUR-SITE.netlify.app` (or your custom domain) |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` | Storage for receipts |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Email codes |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEXT_PUBLIC_TELEGRAM_BOT` | Telegram codes (bot username without @) |
+| `AUTH_DEV_LOG_OTP` | `false` |
+
+3. In **Site configuration → Functions**, set the region to the same as Supabase (for example `ap-northeast-2`), if your plan allows choosing one.
+
+After that, every push to `main` deploys:
 
 ```bash
-npx netlify login
-npx netlify init                  # link or create the site; build command and publish dir come from netlify.toml
-
-npx netlify env:set DATABASE_URL "$DATABASE_URL"
-npx netlify env:set DIRECT_URL "$DIRECT_URL"
-npx netlify env:set SESSION_SECRET "$(openssl rand -hex 32)"
-npx netlify env:set APP_URL "https://YOUR-SITE.netlify.app"
-npx netlify env:set SUPABASE_URL "$SUPABASE_URL"
-npx netlify env:set SUPABASE_SERVICE_ROLE_KEY "$SUPABASE_SERVICE_ROLE_KEY"
-npx netlify env:set SUPABASE_STORAGE_BUCKET qattah
-npx netlify env:set AUTH_DEV_LOG_OTP false
-
-# Email (any SMTP provider, e.g. Resend, Brevo). Verify your domain's SPF and DKIM with the provider first.
-npx netlify env:set SMTP_HOST smtp.resend.com
-npx netlify env:set SMTP_PORT 465
-npx netlify env:set SMTP_USER resend
-npx netlify env:set SMTP_PASS "re_..."
-npx netlify env:set SMTP_FROM "Qattah <noreply@yourdomain.com>"
-
-npx netlify deploy --build --prod
+git push origin main
 ```
+
+A production build runs `prisma migrate deploy` (through `DIRECT_URL`), `next build`, then `scripts/set-telegram-webhook.mjs`. That script points the bot at `APP_URL/api/telegram`. Deploy previews only build. They don't migrate or touch the bot.
 
 Each function keeps one database connection (`connection_limit=1`, set automatically on Netlify), and Supabase's transaction pooler shares connections across them.
 
-For schema changes later: edit `prisma/schema.prisma`, run `npx prisma migrate dev --name what_changed` locally, then run `npx prisma migrate deploy` against Supabase (step 2 above) **before** deploying the code.
+For schema changes: edit `prisma/schema.prisma`, run `npx prisma migrate dev --name what_changed` locally, commit the new migration, and push. The production build applies it.
 
 ### Telegram (codes by phone number)
 
-```bash
-# 1. In Telegram, message @BotFather, send /newbot, and copy the token and the bot username.
-npx netlify env:set TELEGRAM_BOT_TOKEN "123456:ABC..."
-npx netlify env:set NEXT_PUBLIC_TELEGRAM_BOT "YourQattahBot"        # without @
-npx netlify env:set TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"
-npx netlify deploy --build --prod                                   # NEXT_PUBLIC_* is baked in at build time
+1. In Telegram, message @BotFather, send `/newbot`, and copy the token and the bot username into the Netlify variables above.
+2. Push to `main`. The production build registers the webhook. To check it:
 
-# 2. Register the webhook once (use the same token and secret as above).
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-  -d url="https://YOUR-SITE.netlify.app/api/telegram" -d secret_token="<SECRET>"
-curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"           # check: url set, no last_error_message
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"   # url = your site, no last_error_message
 ```
+
+A bot can have only one webhook. A site running on your machine can't receive Telegram messages: the bot stays silent locally, and codes for phones print in the dev terminal when `AUTH_DEV_LOG_OTP=true`.
 
 Users open the bot, tap **Share my number**, then sign in with their phone number (`05xxxxxxxx` or `+9665…`). The bot accepts only the sender's own contact. Local numbers default to +966 (`DEFAULT_COUNTRY_CODE` in `src/lib/phone.ts`).
 
