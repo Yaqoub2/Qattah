@@ -1,95 +1,115 @@
-import { requirePageUser } from "@/lib/page-auth";
-import { Brand, BottomNav } from "@/components/shell";
-import { NetChart } from "@/components/net-chart";
-import { formatMoney, fromMinor } from "@/lib/money";
 import { getLocale, getTranslations } from "next-intl/server";
-import { notFound } from "next/navigation";
-import { isAdminRole } from "@/lib/quota";
-import { PrintButton } from "@/components/print-button";
-import { getGroupExpenses, getGroupMembers, getGroupMembership, getGroupPayments } from "@/lib/workspace";
+import { GroupPage, Section } from "@/components/page";
+import { formatDay } from "@/lib/format";
+import { formatMoney } from "@/lib/money";
+import { computeGroupLedger } from "@/server/group-ledger";
+import { pageGroup } from "@/server/guard";
 
-export default async function ReportsPage({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ groupId: string }>;
-  searchParams: Promise<{ activityId?: string; expenseId?: string }>;
-}) {
-  const user = await requirePageUser();
+export default async function ReportsPage({ params }: { params: Promise<{ groupId: string }> }) {
   const { groupId } = await params;
-  const q = await searchParams;
-  const membership = await getGroupMembership(groupId, user.id);
-  if (!membership) notFound();
-  const t = await getTranslations("report");
-  const tg = await getTranslations("group");
-  const locale = await getLocale();
-  const admin = isAdminRole(membership.role);
-
-  const [members, allExpenses, allPayments] = await Promise.all([
-    getGroupMembers(groupId),
-    getGroupExpenses(groupId),
-    getGroupPayments(groupId),
+  const access = pageGroup(groupId);
+  const [{ group }, ledgerOrNull, t, locale] = await Promise.all([
+    access,
+    computeGroupLedger(groupId, access.then((a) => a.group)),
+    getTranslations(),
+    getLocale(),
   ]);
-  const expenses = allExpenses.filter(
-    (e) =>
-      e.approvalStatus === "approved" &&
-      (!q.activityId || e.activityId === q.activityId) &&
-      (!q.expenseId || e.id === q.expenseId),
-  );
-  const payments = allPayments.filter((p) => p.approvalStatus === "approved");
-
-  const chart = members.map((m) => ({
-    name: m.user.name,
-    net: fromMinor(m.netAmount, membership.group.currency),
-    due: fromMinor(m.dueAmount, membership.group.currency),
-    paid: fromMinor(m.paidAmount, membership.group.currency),
-  }));
-
-  const title = q.expenseId ? t("expense") : q.activityId ? t("activity") : t("group");
+  const ledger = ledgerOrNull!;
+  const money = (v: number) => formatMoney(v, group.currency, locale);
+  const names = new Map(group.members.map((m) => [m.userId, m.name]));
+  const spent = ledger.activities.reduce((s, a) => s + a.total, 0);
+  const paidIn = ledger.cash + spent;
+  const exportUrl = (kind: string) => `/api/groups/${groupId}/export?kind=${kind}&locale=${locale}`;
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-lg flex-col px-4 pt-5">
-      <Brand compact />
-      <h1 className="mt-6 text-2xl font-bold">{title}</h1>
-      <div className="no-print mt-3 flex gap-2">
-        <a
-          className="btn btn-primary text-sm"
-          href={`/api/groups/${groupId}/export?format=xlsx${q.activityId ? `&activityId=${q.activityId}` : ""}${q.expenseId ? `&expenseId=${q.expenseId}` : ""}`}
-        >
-          {t("exportXlsx")}
-        </a>
-        <PrintButton label={t("print")} />
+    <GroupPage group={group}>
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <Total label={t("report.spent")} value={money(spent)} />
+        <Total label={t("report.paidIn")} value={money(paidIn)} />
+        <Total label={t("ledger.cash")} value={money(ledger.cash)} />
       </div>
-      <div className="card mt-4 p-3">
-        <div className="mb-2 text-sm font-semibold">{t("paidVsDue")}</div>
-        <NetChart data={chart} />
-      </div>
-      <div className="mt-4 space-y-2">
-        {members.map((m) => (
-          <div key={m.userId} className="flex justify-between text-sm">
-            <span>{m.user.name}</span>
-            <span>
-              {formatMoney(m.netAmount, membership.group.currency, locale)}
-              {admin || m.userId === user.id
-                ? ` · ${m.userId === user.id ? tg("due") : tg("shareDue")} ${formatMoney(m.dueAmount, membership.group.currency, locale)}`
-                : ""}
-            </span>
-          </div>
-        ))}
-      </div>
-      <h2 className="mt-6 font-bold">{t("expenses")}</h2>
-      {expenses.map((e) => (
-        <div key={e.id} className="mt-2 text-sm">
-          {e.activity.title} · {e.title} · {formatMoney(e.amount, membership.group.currency, locale)}
+
+      <Section title={t("ledger.members")}>
+        <div className="card overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-ink/50">
+              <tr>
+                <th className="px-3 py-2 text-start font-normal">{t("report.member")}</th>
+                <th className="px-3 py-2 text-end font-normal">{t("ledger.paid")}</th>
+                <th className="px-3 py-2 text-end font-normal">{t("ledger.due")}</th>
+                <th className="px-3 py-2 text-end font-normal">{t("report.balance")}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {group.members.map((m) => {
+                const b = ledger.byUser[m.userId];
+                return (
+                  <tr key={m.userId}>
+                    <td className="px-3 py-2">{m.name}</td>
+                    <td className="px-3 py-2 text-end">{money(b.paid)}</td>
+                    <td className="px-3 py-2 text-end">{money(b.due)}</td>
+                    <td className={`px-3 py-2 text-end font-semibold ${b.balance >= 0 ? "text-teal" : "text-rose"}`}>
+                      {money(b.balance)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-      ))}
-      <h2 className="mt-6 font-bold">{t("payments")}</h2>
-      {payments.map((p) => (
-        <div key={p.id} className="mt-2 text-sm">
-          {p.payer.name} · {formatMoney(p.amount, membership.group.currency, locale)}
+      </Section>
+
+      <Section title={t("report.byActivity")}>
+        <div className="space-y-2">
+          {ledger.activities.map((a) => {
+            const split = ledger.byActivity[a.id];
+            return (
+              <details key={a.id} className="card p-4 text-sm">
+                <summary className="flex cursor-pointer items-center justify-between">
+                  <span className="font-medium">
+                    {a.title} <span className="text-xs text-ink/50">· {formatDay(a.startsOn, locale)}</span>
+                  </span>
+                  <span>{money(a.total)}</span>
+                </summary>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {Object.entries(split.dues).map(([userId, due]) => (
+                    <li key={userId} className="flex justify-between">
+                      <span>{names.get(userId)}</span>
+                      <span>{money(due)}</span>
+                    </li>
+                  ))}
+                  {split.unassigned !== 0 && (
+                    <li className="flex justify-between text-amber">
+                      <span>{t("report.unassigned")}</span>
+                      <span>{money(split.unassigned)}</span>
+                    </li>
+                  )}
+                </ul>
+              </details>
+            );
+          })}
         </div>
-      ))}
-      <BottomNav />
+      </Section>
+
+      <Section title={t("report.export")}>
+        <div className="grid grid-cols-2 gap-2">
+          <a className="btn btn-ghost text-sm" href={exportUrl("summary")}>
+            {t("report.exportSummary")}
+          </a>
+          <a className="btn btn-ghost text-sm" href={exportUrl("transactions")}>
+            {t("report.exportTransactions")}
+          </a>
+        </div>
+      </Section>
+    </GroupPage>
+  );
+}
+
+function Total({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="card p-3">
+      <div className="text-[11px] text-ink/50">{label}</div>
+      <div className="mt-1 text-sm font-bold">{value}</div>
     </div>
   );
 }

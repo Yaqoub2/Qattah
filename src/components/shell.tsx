@@ -2,67 +2,55 @@
 
 import { Link, usePathname } from "@/i18n/routing";
 import { useTranslations } from "next-intl";
-import { Home, Users, UserRound, Loader2, type LucideIcon } from "lucide-react";
-import { useLinkStatus } from "next/link";
-import { CacheRefresh } from "@/components/cache-refresh";
-
-function NavPendingIcon({ icon: Icon }: { icon: LucideIcon }) {
-  const { pending } = useLinkStatus();
-  if (pending) return <Loader2 size={20} className="animate-spin" />;
-  return <Icon size={20} />;
-}
+import { Home, UserRound } from "lucide-react";
 
 export function BottomNav() {
   const t = useTranslations("nav");
   const path = usePathname();
   const items = [
-    { href: "/home", label: t("home"), icon: Home, match: "/home" },
-    { href: "/home", label: t("groups"), icon: Users, match: "/groups" },
-    { href: "/profile", label: t("profile"), icon: UserRound, match: "/profile" },
+    { href: "/home", label: t("home"), icon: Home, active: path === "/home" || path.startsWith("/groups") },
+    { href: "/profile", label: t("profile"), icon: UserRound, active: path.startsWith("/profile") },
   ];
   return (
-    <nav className="bottom-nav no-print mt-6">
-      <div className="mx-auto grid max-w-lg grid-cols-3 px-2 py-2">
-        {items.map((item) => {
-          const active = path.startsWith(item.match);
-          return (
-            <Link
-              key={item.match}
-              href={item.href}
-              className={`flex flex-col items-center gap-0.5 rounded-xl py-1 text-xs ${
-                active ? "text-teal" : "text-ink/50"
-              }`}
-            >
-              <NavPendingIcon icon={item.icon} />
-              {item.label}
-            </Link>
-          );
-        })}
+    <nav className="bottom-nav">
+      <div className="mx-auto grid max-w-lg grid-cols-2 px-2 py-2">
+        {items.map(({ href, label, icon: Icon, active }) => (
+          <Link
+            key={href}
+            href={href}
+            className={`flex flex-col items-center gap-0.5 py-1 text-xs ${active ? "text-teal" : "text-ink/50"}`}
+          >
+            <Icon size={20} />
+            {label}
+          </Link>
+        ))}
       </div>
     </nav>
   );
 }
 
-export function Brand({
-  compact = false,
-  showRefresh = false,
-  refreshGroupId,
-}: {
-  compact?: boolean;
-  showRefresh?: boolean;
-  refreshGroupId?: string;
-}) {
-  const t = useTranslations();
+/** Tabs inside a group. */
+export function GroupTabs({ groupId }: { groupId: string }) {
+  const t = useTranslations("nav");
+  const path = usePathname();
+  const base = `/groups/${groupId}`;
+  const tabs = [
+    { href: base, label: t("overview"), active: path === base || path.startsWith(`${base}/activities`) },
+    { href: `${base}/payments`, label: t("payments"), active: path.startsWith(`${base}/payments`) },
+    { href: `${base}/members`, label: t("members"), active: path.startsWith(`${base}/members`) },
+    { href: `${base}/reports`, label: t("reports"), active: path.startsWith(`${base}/reports`) },
+  ];
   return (
-    <div className="flex items-center gap-2">
-      <div className="mark text-lg">ق</div>
-      {!compact && (
-        <div>
-          <div className="text-lg font-bold leading-none">{t("brand")}</div>
-          <div className="text-[11px] text-ink/50">{t("tagline")}</div>
-        </div>
-      )}
-      {showRefresh && <CacheRefresh groupId={refreshGroupId} />}
+    <div className="mt-4 grid grid-cols-4 gap-1 rounded-2xl bg-line/60 p-1 text-sm">
+      {tabs.map((tab) => (
+        <Link
+          key={tab.href}
+          href={tab.href}
+          className={`rounded-xl py-2 text-center ${tab.active ? "bg-card font-semibold shadow-sm" : "text-ink/60"}`}
+        >
+          {tab.label}
+        </Link>
+      ))}
     </div>
   );
 }

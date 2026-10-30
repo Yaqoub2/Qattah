@@ -1,5 +1,8 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets   = ["native", "rhel-openssl-3.0.x"]
+  /// Relations load in the same SQL statement (one round trip) instead of one query per relation.
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -8,141 +11,113 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-enum UserStatus {
-  invited
-  active
-  disabled
-}
-
-enum GroupRole {
+enum Role {
   owner
   admin
   member
 }
 
 enum SplitMethod {
-  equal
+  amount
   shares
   percentage
-  amount
 }
 
-enum ActivityStatus {
-  open
-  closed
+enum Channel {
+  email
+  telegram
 }
 
-enum ApprovalStatus {
-  pending
-  approved
-  rejected
+enum MethodKind {
+  bank
+  link
+  qr
+  other
 }
 
+/// A person. Signs in with a code sent by email, or by Telegram to their phone number (E.164).
 model User {
-  id        String     @id @default(uuid()) @db.Uuid
-  phone     String?    @unique
-  email     String?    @unique
+  id        String   @id @default(uuid()) @db.Uuid
   name      String
-  locale    String     @default("ar")
-  status    UserStatus @default(invited)
-  claimedAt DateTime?  @map("claimed_at")
-  createdAt DateTime   @default(now()) @map("created_at")
-  updatedAt DateTime   @updatedAt @map("updated_at")
+  email     String?  @unique
+  phone     String?  @unique
+  locale    String   @default("ar") @db.VarChar(2)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  memberships      GroupMember[]
-  paymentMethods   UserPaymentMethod[]
-  payments         Payment[]
-  createdGroups    Group[]             @relation("GroupCreator")
-  createdActivities Activity[]         @relation("ActivityCreator")
-  createdExpenses  Expense[]           @relation("ExpenseCreator")
-  otps             OtpChallenge[]
-  sessions         Session[]
-  auditLogs        GroupAuditLog[]
-  expensePayers    ExpensePayer[]
-  notifications    NotificationLog[]
-  inviteTokens     InviteToken[]
+  sessions       Session[]
+  memberships    GroupMember[]
+  paymentMethods PaymentMethod[]
 
   @@map("users")
 }
 
+/// Revocable login. The cookie holds a signed JWT with this id.
 model Session {
   id        String   @id @default(uuid()) @db.Uuid
   userId    String   @map("user_id") @db.Uuid
-  token     String   @unique
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("sessions")
 }
 
+/// One-time sign-in code. Only the hash is stored.
 model OtpChallenge {
   id         String   @id @default(uuid()) @db.Uuid
-  userId     String?  @map("user_id") @db.Uuid
   identifier String
-  channel    String
+  channel    Channel
   codeHash   String   @map("code_hash")
-  attempts   Int      @default(0)
-  expiresAt  DateTime @map("expires_at")
-  createdAt  DateTime @default(now()) @map("created_at")
-  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attempts   Int      @default(0) @db.SmallInt
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  @@index([identifier, createdAt])
+  @@index([identifier, createdAt(sort: Desc)])
   @@map("otp_challenges")
 }
 
-model InviteToken {
-  id        String   @id @default(uuid()) @db.Uuid
-  token     String   @unique
-  userId    String   @map("user_id") @db.Uuid
-  groupId   String   @map("group_id") @db.Uuid
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+/// Phone (E.164) -> Telegram chat, written when the user shares their own contact with the bot.
+model TelegramChat {
+  phone     String   @id
+  chatId    BigInt   @unique @map("chat_id")
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  @@index([groupId])
-  @@map("invite_tokens")
+  @@map("telegram_chats")
 }
 
 model Group {
-  id                 String      @id @default(uuid()) @db.Uuid
-  name               String
-  currency           String      @default("SAR")
-  defaultSplitMethod SplitMethod @default(equal) @map("default_split_method")
-  membersCanSubmit   Boolean     @default(true) @map("members_can_submit")
-  createdById        String      @map("created_by_id") @db.Uuid
-  createdAt          DateTime    @default(now()) @map("created_at")
-  updatedAt          DateTime    @updatedAt @map("updated_at")
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  currency    String   @default("SAR") @db.Char(3)
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  creator        User                 @relation("GroupCreator", fields: [createdById], references: [id])
   members        GroupMember[]
   activities     Activity[]
-  payments       Payment[]
-  paymentMethods GroupPaymentMethod[]
-  auditLogs      GroupAuditLog[]
-  notifications  NotificationLog[]
-  expenses       Expense[]
-  inviteTokens   InviteToken[]
-  budgetEvents   GroupBudgetEvent[]
+  paymentMethods PaymentMethod[]
 
   @@map("groups")
 }
 
+/// Paying members owe every activity starting on or after `startsOn`.
+/// Other members owe only activities they are listed on (activity_members).
+/// split_method/split_value is the default rule; null means it must be set per activity.
 model GroupMember {
-  groupId           String    @map("group_id") @db.Uuid
-  userId            String    @map("user_id") @db.Uuid
-  role              GroupRole @default(member)
-  isPayingUser      Boolean   @default(false) @map("is_paying_user")
-  defaultShare      Int       @default(1) @map("default_share")
-  defaultPercentage Decimal?  @map("default_percentage") @db.Decimal(10, 4)
-  defaultAmount     Int?      @map("default_amount")
-  invitedAt         DateTime  @default(now()) @map("invited_at")
-  firstEnteredAt    DateTime? @map("first_entered_at")
+  groupId     String       @map("group_id") @db.Uuid
+  userId      String       @map("user_id") @db.Uuid
+  role        Role         @default(member)
+  isPaying    Boolean      @default(false) @map("is_paying")
+  startsOn    DateTime     @default(now()) @map("starts_on") @db.Date
+  splitMethod SplitMethod? @map("split_method")
+  splitValue  Decimal?     @map("split_value") @db.Decimal(14, 4)
 
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group            Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user             User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  activityEntries  ActivityMember[]
+  paymentsMade     Payment[]        @relation("PaymentPayer")
+  paymentsReceived Payment[]        @relation("PaymentPayee")
+  reminders        Reminder[]
 
   @@id([groupId, userId])
   @@index([userId])
@@ -150,214 +125,122 @@ model GroupMember {
 }
 
 model Activity {
-  id          String         @id @default(uuid()) @db.Uuid
-  groupId     String         @map("group_id") @db.Uuid
-  title       String
-  description String?
-  startsAt    DateTime?      @map("starts_at")
-  endsAt      DateTime?      @map("ends_at")
-  status      ActivityStatus @default(open)
-  createdById String         @map("created_by_id") @db.Uuid
-  createdAt   DateTime       @default(now()) @map("created_at")
-  updatedAt   DateTime       @updatedAt @map("updated_at")
+  id        String    @id @default(uuid()) @db.Uuid
+  groupId   String    @map("group_id") @db.Uuid
+  title     String
+  startsOn  DateTime  @default(now()) @map("starts_on") @db.Date
+  /// Set when an admin closes it: dues are frozen into activity_members and expenses can't change (DB trigger).
+  closedAt  DateTime? @map("closed_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  creator   User     @relation("ActivityCreator", fields: [createdById], references: [id])
-  expenses  Expense[]
+  group    Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  members  ActivityMember[]
+  expenses Expense[]
+  payments Payment[]
 
-  @@index([groupId])
-  @@index([groupId, status])
+  @@unique([id, groupId])
+  @@index([groupId, startsOn(sort: Desc)])
   @@map("activities")
 }
 
-model Expense {
-  id             String           @id @default(uuid()) @db.Uuid
-  activityId     String           @map("activity_id") @db.Uuid
-  groupId        String           @map("group_id") @db.Uuid
-  title          String
-  notes          String?
-  receiptUrl     String?          @map("receipt_url")
-  amount         Int
-  splitMethod    SplitMethod      @map("split_method")
-  approvalStatus ApprovalStatus   @default(approved) @map("approval_status")
-  budgetPaidAmount Int              @default(0) @map("budget_paid_amount")
-  isSealed       Boolean          @default(false) @map("is_sealed")
-  createdById    String           @map("created_by_id") @db.Uuid
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
+/// Lists an other member on an activity, or overrides a member's rule for this activity.
+model ActivityMember {
+  activityId  String       @map("activity_id") @db.Uuid
+  groupId     String       @map("group_id") @db.Uuid
+  userId      String       @map("user_id") @db.Uuid
+  splitMethod SplitMethod? @map("split_method")
+  splitValue  Decimal?     @map("split_value") @db.Decimal(14, 4)
 
-  activity    Activity            @relation(fields: [activityId], references: [id], onDelete: Cascade)
-  group       Group               @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  creator     User                @relation("ExpenseCreator", fields: [createdById], references: [id])
-  shares      ExpenseShare[]
-  payers      ExpensePayer[]
-  allocations PaymentAllocation[]
+  activity Activity    @relation(fields: [activityId, groupId], references: [id, groupId], onDelete: Cascade)
+  member   GroupMember @relation(fields: [groupId, userId], references: [groupId, userId], onDelete: Cascade)
 
+  @@id([activityId, userId])
   @@index([groupId])
-  @@index([activityId])
-  @@index([groupId, approvalStatus])
+  @@map("activity_members")
+}
+
+model Expense {
+  id           String    @id @default(uuid()) @db.Uuid
+  groupId      String    @map("group_id") @db.Uuid
+  activityId   String    @map("activity_id") @db.Uuid
+  title        String
+  amount       Int
+  receiptPath  String?   @map("receipt_path")
+  /// Sealed = fixed amount: it can't be changed, deleted or unsealed (DB trigger). Unsealed amounts can be edited.
+  sealed       Boolean   @default(false)
+  /// Null while waiting for an admin; pending rows are not part of the ledger.
+  approvedAt   DateTime? @map("approved_at") @db.Timestamptz(3)
+  approvedById String?   @map("approved_by_id") @db.Uuid
+  createdById  String    @map("created_by_id") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  activity Activity @relation(fields: [activityId, groupId], references: [id, groupId], onDelete: Cascade)
+
+  @@index([groupId, activityId])
   @@map("expenses")
 }
 
-model ExpenseShare {
-  id             String @id @default(uuid()) @db.Uuid
-  expenseId      String @map("expense_id") @db.Uuid
-  userId         String @map("user_id") @db.Uuid
-  included       Boolean @default(true)
-  shareWeight    Int     @default(1) @map("share_weight")
-  percentage     Decimal? @db.Decimal(10, 4)
-  amountOverride Int?    @map("amount_override")
-  dueAmount      Int     @map("due_amount")
-  baselineAmount Int     @map("baseline_amount")
-
-  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
-
-  @@unique([expenseId, userId])
-  @@index([userId])
-  @@map("expense_shares")
-}
-
-model ExpensePayer {
-  id        String  @id @default(uuid()) @db.Uuid
-  expenseId String  @map("expense_id") @db.Uuid
-  userId    String  @map("user_id") @db.Uuid
-  amount    Int
-  paymentId String? @map("payment_id") @db.Uuid
-
-  expense Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
-  user    User     @relation(fields: [userId], references: [id])
-  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
-
-  @@unique([expenseId, userId])
-  @@index([userId])
-  @@index([paymentId])
-  @@map("expense_payers")
-}
-
+/// The only record of money paid. payee null = paid into the group;
+/// payee set = paid to that member, which deducts from what the payee has paid.
 model Payment {
-  id             String         @id @default(uuid()) @db.Uuid
-  groupId        String         @map("group_id") @db.Uuid
-  payerUserId    String         @map("payer_user_id") @db.Uuid
-  amount         Int
-  notes          String?
-  receiptUrl     String?        @map("receipt_url")
-  methodSnapshot String?        @map("method_snapshot")
-  paidAt         DateTime       @default(now()) @map("paid_at")
-  approvalStatus ApprovalStatus @default(approved) @map("approval_status")
-  createdAt      DateTime       @default(now()) @map("created_at")
+  id           String    @id @default(uuid()) @db.Uuid
+  groupId      String    @map("group_id") @db.Uuid
+  activityId   String?   @map("activity_id") @db.Uuid
+  payerId      String    @map("payer_id") @db.Uuid
+  payeeId      String?   @map("payee_id") @db.Uuid
+  amount       Int
+  paidOn       DateTime  @default(now()) @map("paid_on") @db.Date
+  note         String?
+  receiptPath  String?   @map("receipt_path")
+  /// Null while waiting for an admin; pending rows are not part of the ledger.
+  approvedAt   DateTime? @map("approved_at") @db.Timestamptz(3)
+  approvedById String?   @map("approved_by_id") @db.Uuid
+  createdById  String    @map("created_by_id") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  group       Group               @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  payer       User                @relation(fields: [payerUserId], references: [id])
-  allocations PaymentAllocation[]
-  expensePayers ExpensePayer[]
+  activity Activity?    @relation(fields: [activityId, groupId], references: [id, groupId], onDelete: Restrict)
+  payer    GroupMember  @relation("PaymentPayer", fields: [groupId, payerId], references: [groupId, userId], onDelete: Restrict)
+  payee    GroupMember? @relation("PaymentPayee", fields: [groupId, payeeId], references: [groupId, userId], onDelete: Restrict)
 
-  @@index([groupId])
-  @@index([groupId, approvalStatus])
-  @@index([payerUserId])
+  @@index([groupId, paidOn(sort: Desc)])
+  @@index([activityId])
   @@map("payments")
 }
 
-model PaymentAllocation {
-  id        String @id @default(uuid()) @db.Uuid
-  paymentId String @map("payment_id") @db.Uuid
-  expenseId String @map("expense_id") @db.Uuid
-  amount    Int
+/// How to pay someone: a member's own account, or the group's account. Exactly one owner.
+model PaymentMethod {
+  id          String     @id @default(uuid()) @db.Uuid
+  userId      String?    @map("user_id") @db.Uuid
+  groupId     String?    @map("group_id") @db.Uuid
+  kind        MethodKind
+  label       String
+  iban        String?
+  beneficiary String?
+  linkUrl     String?    @map("link_url")
+  qrPath      String?    @map("qr_path")
+  details     String?
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
-
-  @@index([expenseId])
-  @@index([paymentId])
-  @@map("payment_allocations")
-}
-
-model UserPaymentMethod {
-  id              String  @id @default(uuid()) @db.Uuid
-  userId          String  @map("user_id") @db.Uuid
-  type            String
-  label           String
-  iban            String?
-  beneficiaryName String? @map("beneficiary_name")
-  qrImageUrl      String? @map("qr_image_url")
-  linkUrl         String? @map("link_url")
-  details         String?
-  isDefault       Boolean @default(false) @map("is_default")
-  createdAt       DateTime @default(now()) @map("created_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user  User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group? @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@map("user_payment_methods")
-}
-
-model GroupPaymentMethod {
-  id              String  @id @default(uuid()) @db.Uuid
-  groupId         String  @map("group_id") @db.Uuid
-  type            String
-  label           String
-  iban            String?
-  beneficiaryName String? @map("beneficiary_name")
-  qrImageUrl      String? @map("qr_image_url")
-  linkUrl         String? @map("link_url")
-  details         String?
-  sourceUserId    String? @map("source_user_id") @db.Uuid
-  isDefault       Boolean @default(false) @map("is_default")
-  createdAt       DateTime @default(now()) @map("created_at")
-
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-
   @@index([groupId])
-  @@map("group_payment_methods")
+  @@map("payment_methods")
 }
 
-model GroupAuditLog {
-  id         String   @id @default(uuid()) @db.Uuid
-  groupId    String   @map("group_id") @db.Uuid
-  actorUserId String? @map("actor_user_id") @db.Uuid
-  action     String
-  entityType String   @map("entity_type")
-  entityId   String?  @map("entity_id")
-  metadata   Json?
-  createdAt  DateTime @default(now()) @map("created_at")
+/// Sent reminder: the log, and the source for the per-member rate limit.
+model Reminder {
+  id       String   @id @default(uuid()) @db.Uuid
+  groupId  String   @map("group_id") @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  sentById String   @map("sent_by_id") @db.Uuid
+  channel  Channel
+  amount   Int
+  sentAt   DateTime @default(now()) @map("sent_at") @db.Timestamptz(3)
 
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  actor User? @relation(fields: [actorUserId], references: [id])
+  member GroupMember @relation(fields: [groupId, userId], references: [groupId, userId], onDelete: Cascade)
 
-  @@index([groupId, createdAt])
-  @@map("group_audit_logs")
-}
-
-model NotificationLog {
-  id          String   @id @default(uuid()) @db.Uuid
-  groupId     String   @map("group_id") @db.Uuid
-  actorUserId String?  @map("actor_user_id") @db.Uuid
-  channel     String
-  targetType  String   @map("target_type")
-  targetId    String?  @map("target_id")
-  recipient   String
-  body        String
-  sentAt      DateTime @default(now()) @map("sent_at")
-
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  actor User? @relation(fields: [actorUserId], references: [id])
-
-  @@index([groupId, sentAt])
-  @@map("notification_logs")
-}
-
-model GroupBudgetEvent {
-  id          String   @id @default(uuid()) @db.Uuid
-  groupId     String   @map("group_id") @db.Uuid
-  amount      Int
-  kind        String
-  expenseId   String?  @map("expense_id") @db.Uuid
-  paymentId   String?  @map("payment_id") @db.Uuid
-  actorUserId String?  @map("actor_user_id") @db.Uuid
-  note        String?
-  createdAt   DateTime @default(now()) @map("created_at")
-
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
-
-  @@index([groupId, createdAt])
-  @@map("group_budget_events")
+  @@index([groupId, userId, sentAt(sort: Desc)])
+  @@map("reminders")
 }

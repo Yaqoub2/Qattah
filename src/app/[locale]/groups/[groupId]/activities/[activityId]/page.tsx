@@ -1,214 +1,332 @@
-import { requirePageUser } from "@/lib/page-auth";
-import { Brand, BottomNav } from "@/components/shell";
-import { Link } from "@/i18n/routing";
-import { closeActivity, reopenActivity, deleteActivity } from "@/actions/activities";
-import { setExpenseApproval } from "@/actions/expenses";
 import { getLocale, getTranslations } from "next-intl/server";
-import { formatMoney } from "@/lib/money";
-import { allocatedFromUser, collectedOf, paySuggestion, remainingDueOnExpense, wasMemberAt } from "@/lib/ledger";
 import { notFound } from "next/navigation";
-import { isAdminRole } from "@/lib/quota";
-import { ServerFormAction } from "@/lib/utils";
-import { RemindForm } from "@/components/remind-form";
-import { FoldSection } from "@/components/fold-section";
-import { ContributorList } from "@/components/contributor-list";
-import { DeleteRecordButton } from "@/components/delete-record";
-import { contributorsForExpenses } from "@/lib/contributors";
-import { isAnonymousUser } from "@/lib/anonymous";
-import { getActivityDetail, getGroupMembership } from "@/lib/workspace";
-import { Plus } from "lucide-react";
+import { Link } from "@/i18n/routing";
+import {
+  addExpense,
+  closeActivity,
+  deleteActivity,
+  deleteExpense,
+  removeActivityMember,
+  reopenActivity,
+  sealExpense,
+  setActivityMember,
+  updateExpense,
+} from "@/actions/activities";
+import { ActionForm, Field, Hidden, SplitFields, SubmitButton } from "@/components/forms";
+import { Empty, Fold, GroupPage, Section } from "@/components/page";
+import { PaymentRow } from "@/components/payment-row";
+import { ReceiptInput, ReceiptLink } from "@/components/receipt";
+import { formatDay, ruleInput, ruleText } from "@/lib/format";
+import { activityPaid, activityParticipants, activitySummary, splitActivity } from "@/lib/ledger";
+import { formatMoney, fromMinor } from "@/lib/money";
+import { pageGroup } from "@/server/guard";
+import { ledgerMembers, listEntries, loadActivity } from "@/server/queries";
+import { signedUrls, storageEnabled } from "@/server/storage";
 
-export default async function ActivityPage({
-  params,
-}: {
-  params: Promise<{ groupId: string; activityId: string }>;
-}) {
-  const user = await requirePageUser();
+export default async function ActivityPage({ params }: { params: Promise<{ groupId: string; activityId: string }> }) {
   const { groupId, activityId } = await params;
-  const [activity, membership] = await Promise.all([
-    getActivityDetail(groupId, activityId),
-    getGroupMembership(groupId, user.id),
+  const [{ user, group, admin }, activity, entries, t, locale] = await Promise.all([
+    pageGroup(groupId),
+    loadActivity(groupId, activityId),
+    listEntries(groupId, activityId),
+    getTranslations(),
+    getLocale(),
   ]);
-  if (!activity || !membership) notFound();
-  const admin = isAdminRole(membership.role);
-  const t = await getTranslations();
-  const locale = await getLocale();
-  const open = activity.status === "open";
-  const hasSealedExpense = activity.expenses.some((e) => e.isSealed);
+  if (!activity) notFound();
+  const receipts = await signedUrls([...activity.expenses, ...activity.payments].map((r) => r.receiptPath));
+  const receiptOf = (path: string | null) => (path ? receipts.get(path) : undefined);
 
-  const visible = activity.expenses.filter((e) => e.approvalStatus === "approved" || admin || e.createdById === user.id);
-  const anonLabel = t("payment.anonymous");
-  const contributors = contributorsForExpenses(
-    visible
-      .filter((e) => e.approvalStatus === "approved")
-      .map((e) => ({
-        ...e,
-        payers: e.payers.map((p) => ({
-          ...p,
-          user: p.user
-            ? { name: isAnonymousUser(p.user) ? anonLabel : p.user.name }
-            : p.user,
-        })),
-        allocations: e.allocations.map((a) => ({
-          ...a,
-          payment: a.payment
-            ? {
-                ...a.payment,
-                payer: a.payment.payer
-                  ? { name: isAnonymousUser(a.payment.payer) ? anonLabel : a.payment.payer.name }
-                  : a.payment.payer,
-              }
-            : a.payment,
-        })),
-      })),
-  );
+  const total = activity.expenses.reduce((s, e) => s + (e.approvedAt ? e.amount : 0), 0);
+  const participants = activityParticipants({ ...activity, total }, ledgerMembers(group), entries);
+  const open = !activity.closed;
+  const split = splitActivity(total, participants);
+  const listed = new Map(entries.map((e) => [e.userId, e]));
+  const inActivity = new Set(participants.map((p) => p.userId));
+  const covered = activityPaid(activity.payments.filter((p) => p.approvedAt));
+  const report = activitySummary(split, covered);
+  const exportUrl = (kind: string) => `/api/groups/${groupId}/export?kind=${kind}&activityId=${activityId}&locale=${locale}`;
+  const money = (v: number) => formatMoney(v, group.currency, locale);
+  const ruleT = (key: "sharesN" | "percentN", v: { n: string }) => t(`split.${key}`, v);
+  const ids = { groupId, activityId };
+  const names = new Map(group.members.map((m) => [m.userId, m.name]));
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-lg flex-col px-4 pt-5">
-      <Brand compact showRefresh refreshGroupId={groupId} />
-      <p className="mt-5 text-[11px] font-semibold uppercase tracking-wide text-ink/40">
-        {open ? t("group.open") : t("group.closed")}
-        {activity.startsAt ? ` · ${activity.startsAt.toLocaleDateString(locale)}` : ""}
-        {activity.endsAt ? ` → ${activity.endsAt.toLocaleDateString(locale)}` : ""}
-      </p>
-      <h1 className="mt-1 text-2xl font-bold">{activity.title}</h1>
-      {activity.description && <p className="mt-1 text-ink/60">{activity.description}</p>}
-      {open && (admin || activity.createdById === user.id) && (
-        <Link href={`/groups/${groupId}/activities/${activityId}/edit`} className="mt-2 inline-block text-sm text-teal">
-          {t("activity.edit")}
-        </Link>
-      )}
-
-      {open ? (
-        <Link
-          href={`/groups/${groupId}/activities/${activityId}/expenses/new`}
-          className="btn btn-primary mt-5 min-h-14 w-full text-base"
-        >
-          <Plus size={20} />
-          {t("activity.newExpense")}
-        </Link>
-      ) : (
-        <p className="mt-4 rounded-2xl bg-ink/5 px-4 py-3 text-sm text-ink/55">{t("activity.closedHint")}</p>
-      )}
-      {open && <p className="mt-2 text-center text-xs text-ink/45">{t("activity.createExpenseHint")}</p>}
-
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Link
-          href={`/groups/${groupId}/payments/new?activityId=${activityId}`}
-          className="btn btn-ghost"
-        >
-          {t("expense.pay")}
-        </Link>
-        <Link href={`/groups/${groupId}/reports?activityId=${activityId}`} className="btn btn-ghost">
-          {t("nav.reports")}
-        </Link>
-        {admin && open && (
-          <form action={closeActivity as ServerFormAction}>
-            <input type="hidden" name="activityId" value={activityId} />
-            <button className="btn btn-ghost">{t("activity.close")}</button>
-          </form>
-        )}
-        {admin && !open && (
-          <form action={reopenActivity as ServerFormAction}>
-            <input type="hidden" name="activityId" value={activityId} />
-            <button className="btn btn-ghost">{t("activity.reopen")}</button>
-          </form>
-        )}
-        {admin && !hasSealedExpense && (
-          <DeleteRecordButton
-            action={deleteActivity}
-            hidden={{ activityId }}
-            label={t("activity.delete")}
-            confirmMessage={t("common.confirmDelete")}
-            redirectTo={`/groups/${groupId}`}
-          />
-        )}
+    <GroupPage group={group}>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-lg font-bold">{activity.title}</h1>
+          <p className="text-xs text-ink/50">
+            {formatDay(activity.startsOn, locale)}
+            {!open && <span className="ms-2 rounded-full bg-ink/10 px-2 py-0.5 text-ink/70">{t("activity.closed")}</span>}
+          </p>
+        </div>
+        <div className="text-end">
+          <div className="text-lg font-bold">{money(total)}</div>
+          <div className="text-xs text-ink/50">
+            {t("activity.collected", { paid: money(covered.intoGroup), total: money(total) })}
+          </div>
+        </div>
       </div>
 
-      <ContributorList items={contributors} currency={activity.group.currency} locale={locale} />
+      {!open && <p className="rounded-xl bg-ink/5 px-3 py-2 text-sm text-ink/60">{t("activity.closedHint")}</p>}
 
-      <h2 className="mt-8 font-bold">{t("activity.expensesTitle")}</h2>
-      <div className="mt-3 space-y-3">
-        {visible.length === 0 && <div className="card p-5 text-ink/50">{t("activity.emptyExpenses")}</div>}
-        {visible.map((e) => {
-          const collected = collectedOf(e);
-          const myShare = e.shares.find((s) => s.userId === user.id);
-          const unpaid = collected < e.amount && e.approvalStatus === "approved";
-          const countsForMe = wasMemberAt(membership.invitedAt, e.createdAt);
-          const allocatedMine = allocatedFromUser(
-            e.allocations.map((a) => ({
-              amount: a.amount,
-              payerUserId: a.payment?.payerUserId,
-            })),
-            user.id,
-          );
-          const myDue = countsForMe ? remainingDueOnExpense(myShare?.dueAmount ?? 0, allocatedMine) : 0;
-          const suggestion = paySuggestion({
-            expenseUnpaid: unpaid,
-            baselineAmount: 0,
-            demandAmount: myDue,
-          });
-          return (
-            <div key={e.id} className="card p-4">
-              <Link href={`/groups/${groupId}/expenses/${e.id}`} className="block">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold">{e.title}</div>
+      {split.unset.length > 0 && (
+        <p className="rounded-xl bg-amber/10 px-3 py-2 text-sm text-amber">
+          {t("activity.unset", { names: split.unset.map((id) => names.get(id)).join("، ") })}
+        </p>
+      )}
+      {split.unassigned !== 0 && (
+        <p className="rounded-xl bg-amber/10 px-3 py-2 text-sm text-amber">
+          {split.unassigned > 0
+            ? t("activity.unassigned", { amount: money(split.unassigned) })
+            : t("activity.overAssigned", { amount: money(-split.unassigned) })}
+        </p>
+      )}
+
+      <Section title={t("expense.title")}>
+        {activity.expenses.length === 0 ? (
+          <Empty>{t("expense.empty")}</Empty>
+        ) : (
+          <ul className="card divide-y divide-line">
+            {activity.expenses.map((e) => (
+              <li key={e.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
+                <span className="min-w-0 truncate">
+                  {e.title}
+                  {!e.approvedAt && <span className="text-xs text-amber"> · {t("approval.pending")}</span>}
+                  {e.sealed && <span className="text-xs text-ink/50"> · {t("expense.sealed")}</span>}
+                </span>
+                <span className="flex shrink-0 items-center gap-3">
+                  {receiptOf(e.receiptPath) && <ReceiptLink url={receiptOf(e.receiptPath)!} />}
+                  {money(e.amount)}
+                  {open && !e.sealed && (admin || (e.createdById === user.id && !e.approvedAt)) && (
+                    <ActionForm action={deleteExpense} className="" confirm={t("common.confirmDelete")}>
+                      <Hidden values={{ groupId, expenseId: e.id }} />
+                      <SubmitButton className="text-xs text-rose">{t("common.delete")}</SubmitButton>
+                    </ActionForm>
+                  )}
+                </span>
+                {admin && open && !e.sealed && (
+                  <details className="basis-full">
+                    <summary className="cursor-pointer text-xs text-teal">{t("expense.edit")}</summary>
+                    <ActionForm action={updateExpense} className="mt-2 space-y-2" reset={false}>
+                      <Hidden values={{ groupId, expenseId: e.id }} />
+                      <Field label={t("expense.name")} name="title" defaultValue={e.title} required maxLength={80} />
+                      <Field
+                        label={`${t("expense.amount")} (${group.currency})`}
+                        name="amount"
+                        defaultValue={String(fromMinor(e.amount, group.currency))}
+                        inputMode="decimal"
+                        dir="ltr"
+                        required
+                      />
+                      <SubmitButton className="btn btn-primary w-full">{t("common.save")}</SubmitButton>
+                    </ActionForm>
+                    {e.approvedAt && (
+                      <ActionForm action={sealExpense} className="mt-2" confirm={t("expense.confirmSeal")}>
+                        <Hidden values={{ groupId, expenseId: e.id }} />
+                        <SubmitButton className="btn btn-ghost w-full text-xs">{t("expense.seal")}</SubmitButton>
+                      </ActionForm>
+                    )}
+                  </details>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {open && (
+        <Fold label={t("expense.add")} open={activity.expenses.length === 0}>
+          <ActionForm action={addExpense}>
+            <Hidden values={ids} />
+            <Field label={t("expense.name")} name="title" required maxLength={80} />
+            <Field label={`${t("expense.amount")} (${group.currency})`} name="amount" inputMode="decimal" dir="ltr" required />
+            <ReceiptInput enabled={storageEnabled()} />
+            {admin && (
+              <label className="flex items-start gap-2 text-sm">
+                <input type="checkbox" name="sealed" className="mt-1" />
+                <span>
+                  {t("expense.sealedLabel")}
+                  <span className="block text-xs text-ink/50">{t("expense.sealedHint")}</span>
+                </span>
+              </label>
+            )}
+            {!admin && <p className="text-xs text-ink/50">{t("approval.memberHint")}</p>}
+            <SubmitButton>{t("expense.add")}</SubmitButton>
+          </ActionForm>
+        </Fold>
+        )}
+      </Section>
+
+      <Section title={t("activity.participants")}>
+        <ul className="card divide-y divide-line">
+          {group.members.map((m) => {
+            const included = inActivity.has(m.userId);
+            const entry = listed.get(m.userId);
+            const rule = entry?.rule ?? m.rule;
+            const source = entry ? t("activity.listed") : included ? t("activity.auto") : t("activity.notIncluded");
+            return (
+              <li key={m.userId} className="px-4 py-3 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{m.name}</div>
                     <div className="text-xs text-ink/50">
-                      {formatMoney(e.amount, activity.group.currency, locale)}
-                      {e.approvalStatus !== "approved" ? ` · ${t("group.pending")}` : ""}
-                      {e.isSealed ? ` · ${t("expense.sealed")}` : ""}
+                      {source}
+                      {included && ` · ${ruleText(rule, group.currency, locale, ruleT) ?? t("split.none")}`}
                     </div>
                   </div>
-                  <div className="text-end text-xs">
-                    <div>
-                      {t("group.due")}: {formatMoney(myDue, activity.group.currency, locale)}
-                    </div>
-                  </div>
+                  {(included || covered.paid[m.userId]) && (
+                    <PaidVsDue
+                      due={split.dues[m.userId] ?? 0}
+                      paid={covered.paid[m.userId] ?? 0}
+                      money={money}
+                      labels={{ paid: t("ledger.paid"), left: t("activity.left"), done: t("activity.settled"), extra: t("activity.extra") }}
+                    />
+                  )}
                 </div>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
-                  <div
-                    className="h-full bg-teal"
-                    style={{ width: `${Math.min(100, (collected / e.amount) * 100)}%` }}
-                  />
-                </div>
-              </Link>
-              {unpaid && countsForMe && (
-                <Link
-                  href={`/groups/${groupId}/payments/new?activityId=${activityId}&expenseId=${e.id}&amount=${suggestion}`}
-                  className="btn btn-primary mt-3 !min-h-10 w-full text-sm"
-                >
-                  {t("expense.pay")}
-                </Link>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                {admin && open && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-teal">
+                      {included ? t("activity.editRule") : t("activity.include")}
+                    </summary>
+                    <ActionForm action={setActivityMember} className="mt-2 space-y-2" reset={false}>
+                      <Hidden values={{ ...ids, userId: m.userId }} />
+                      <SplitFields {...ruleInput(entry?.rule ?? null, group.currency)} />
+                      <p className="text-xs text-ink/50">{t("activity.ruleHint")}</p>
+                      <SubmitButton className="btn btn-primary w-full">{t("common.save")}</SubmitButton>
+                    </ActionForm>
+                    {entry && (
+                      <ActionForm action={removeActivityMember} className="mt-2" confirm={t("common.confirmDelete")}>
+                        <Hidden values={{ ...ids, userId: m.userId }} />
+                        <SubmitButton className="btn btn-ghost w-full text-xs">
+                          {m.isPaying ? t("activity.clearOverride") : t("activity.removeListing")}
+                        </SubmitButton>
+                      </ActionForm>
+                    )}
+                  </details>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </Section>
 
-      {admin &&
-        activity.expenses
-          .filter((e) => e.approvalStatus === "pending")
-          .map((e) => (
-            <form key={`a-${e.id}`} action={setExpenseApproval as ServerFormAction} className="mt-2 flex gap-2">
-              <input type="hidden" name="expenseId" value={e.id} />
-              <button name="status" value="approved" className="btn btn-primary text-sm">
-                {t("expense.approve")} {e.title}
-              </button>
-              <button name="status" value="rejected" className="btn btn-ghost text-sm">
-                {t("expense.reject")}
-              </button>
-            </form>
-          ))}
+      <Section
+        title={t("payment.forActivity")}
+        action={
+          <Link href={`/groups/${groupId}/payments?activityId=${activityId}`} className="text-sm text-teal">
+            {t("payment.add")}
+          </Link>
+        }
+      >
+        {activity.payments.length === 0 ? (
+          <Empty>{t("payment.empty")}</Empty>
+        ) : (
+          <ul className="card divide-y divide-line">
+            {activity.payments.map((p) => (
+              <PaymentRow
+                key={p.id}
+                payment={p}
+                names={names}
+                currency={group.currency}
+                locale={locale}
+                groupId={groupId}
+                canDelete={admin || (p.createdById === user.id && !p.approvedAt)}
+                receiptUrl={receiptOf(p.receiptPath)}
+              />
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section title={t("report.title")}>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <Total label={t("report.spent")} value={money(total)} />
+          <Total label={t("report.collected")} value={money(report.collected)} />
+          <Total label={t("report.outstanding")} value={money(report.outstanding)} tone={report.outstanding > 0 ? "text-rose" : "text-teal"} />
+        </div>
+        {report.rows.length > 0 && (
+          <div className="card overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-ink/50">
+                <tr>
+                  <th className="px-3 py-2 text-start font-normal">{t("report.member")}</th>
+                  <th className="px-3 py-2 text-end font-normal">{t("ledger.due")}</th>
+                  <th className="px-3 py-2 text-end font-normal">{t("ledger.paid")}</th>
+                  <th className="px-3 py-2 text-end font-normal">{t("activity.left")}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {report.rows.map((r) => (
+                  <tr key={r.userId}>
+                    <td className="px-3 py-2">{names.get(r.userId)}</td>
+                    <td className="px-3 py-2 text-end">{money(r.due)}</td>
+                    <td className="px-3 py-2 text-end">{money(r.paid)}</td>
+                    <td className={`px-3 py-2 text-end font-semibold ${r.left > 0 ? "text-rose" : "text-teal"}`}>{money(r.left)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {report.extra > 0 && <p className="text-xs text-ink/50">{t("report.extraNote", { amount: money(report.extra) })}</p>}
+        <div className="grid grid-cols-2 gap-2">
+          <a className="btn btn-ghost text-sm" href={exportUrl("summary")}>
+            {t("report.exportSummary")}
+          </a>
+          <a className="btn btn-ghost text-sm" href={exportUrl("transactions")}>
+            {t("report.exportTransactions")}
+          </a>
+        </div>
+      </Section>
 
       {admin && (
-        <div className="mt-8">
-          <FoldSection title={t("activity.remindToggle")}>
-            <RemindForm groupId={groupId} targetType="activity" targetId={activityId} />
-          </FoldSection>
+        <div className="space-y-2">
+          <ActionForm action={open ? closeActivity : reopenActivity} confirm={open ? t("activity.confirmClose") : undefined}>
+            <Hidden values={ids} />
+            <SubmitButton className="btn btn-ghost w-full">{open ? t("activity.close") : t("activity.reopen")}</SubmitButton>
+          </ActionForm>
+          {open && (
+            <ActionForm action={deleteActivity} confirm={t("activity.confirmDelete")}>
+              <Hidden values={ids} />
+              <SubmitButton className="btn btn-ghost w-full text-rose">{t("activity.delete")}</SubmitButton>
+            </ActionForm>
+          )}
         </div>
       )}
-      <BottomNav />
+    </GroupPage>
+  );
+}
+
+function PaidVsDue({
+  due,
+  paid,
+  money,
+  labels,
+}: {
+  due: number;
+  paid: number;
+  money: (v: number) => string;
+  labels: { paid: string; left: string; done: string; extra: string };
+}) {
+  const left = due - paid;
+  return (
+    <div className="shrink-0 text-end">
+      <div className="font-semibold">{money(due)}</div>
+      <div className={`text-[11px] ${left > 0 ? "text-rose" : "text-teal"}`}>
+        {left > 0
+          ? `${labels.paid} ${money(paid)} · ${labels.left} ${money(left)}`
+          : left === 0
+            ? labels.done
+            : `${labels.extra} ${money(-left)}`}
+      </div>
+    </div>
+  );
+}
+
+function Total({ label, value, tone = "" }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="card p-3">
+      <div className="text-[11px] text-ink/50">{label}</div>
+      <div className={`mt-1 text-sm font-bold ${tone}`}>{value}</div>
     </div>
   );
 }

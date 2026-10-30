@@ -1,0 +1,152 @@
+import { describe, expect, it } from "vitest";
+import { activityPaid, activityParticipants, activitySummary, distributeExact, groupLedger, splitActivity } from "./ledger";
+
+const day = (s: string) => new Date(`${s}T00:00:00Z`);
+const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
+
+describe("distributeExact", () => {
+  it("sums to the amount and breaks ties by id", () => {
+    const r = distributeExact(100, [
+      { userId: "a", weight: 1 },
+      { userId: "b", weight: 1 },
+      { userId: "c", weight: 1 },
+    ]);
+    expect(r).toEqual({ a: 34, b: 33, c: 33 });
+  });
+
+  it("gives zero weight nothing", () => {
+    expect(distributeExact(10, [{ userId: "a", weight: 0 }, { userId: "b", weight: 2 }])).toEqual({ a: 0, b: 10 });
+  });
+});
+
+describe("splitActivity", () => {
+  it("applies amount, then percentage, then shares", () => {
+    const r = splitActivity(10_000, [
+      { userId: "fixed", rule: { method: "amount", value: 2_000 } },
+      { userId: "pct", rule: { method: "percentage", value: 25 } },
+      { userId: "s1", rule: { method: "shares", value: 1 } },
+      { userId: "s2", rule: { method: "shares", value: 2 } },
+    ]);
+    expect(r.dues).toEqual({ fixed: 2_000, pct: 2_500, s1: 1_833, s2: 3_667 });
+    expect(r.unassigned).toBe(0);
+    expect(sum(r.dues)).toBe(10_000);
+  });
+
+  it("reports members with no rule and leaves the rest unassigned", () => {
+    const r = splitActivity(900, [
+      { userId: "a", rule: { method: "amount", value: 300 } },
+      { userId: "b", rule: null },
+    ]);
+    expect(r.unset).toEqual(["b"]);
+    expect(r.dues.b).toBe(0);
+    expect(r.unassigned).toBe(600);
+  });
+
+  it("flags rules that exceed the total", () => {
+    const r = splitActivity(100, [
+      { userId: "a", rule: { method: "amount", value: 80 } },
+      { userId: "b", rule: { method: "amount", value: 80 } },
+    ]);
+    expect(r.unassigned).toBe(-60);
+  });
+
+  it("splits percentages exactly", () => {
+    const third = { method: "percentage" as const, value: 100 / 3 };
+    const r = splitActivity(100, [
+      { userId: "a", rule: third },
+      { userId: "b", rule: third },
+      { userId: "c", rule: third },
+    ]);
+    expect(sum(r.dues)).toBe(100);
+  });
+});
+
+describe("activityParticipants", () => {
+  const shares = { method: "shares" as const, value: 1 };
+  const members = [
+    { userId: "early", isPaying: true, startsOn: day("2026-01-01"), rule: shares },
+    { userId: "late", isPaying: true, startsOn: day("2026-06-01"), rule: shares },
+    { userId: "guest", isPaying: false, startsOn: day("2026-01-01"), rule: shares },
+    { userId: "listed", isPaying: false, startsOn: day("2026-01-01"), rule: shares },
+  ];
+  const activity = { id: "trip", startsOn: day("2026-03-01"), total: 0 };
+
+  it("includes paying members from their start, and other members only when listed", () => {
+    const p = activityParticipants(activity, members, [{ activityId: "trip", userId: "listed", rule: null }]);
+    expect(p.map((x) => x.userId)).toEqual(["early", "listed"]);
+  });
+
+  it("uses the activity rule over the member rule", () => {
+    const p = activityParticipants(activity, members, [
+      { activityId: "trip", userId: "early", rule: { method: "amount", value: 500 } },
+    ]);
+    expect(p[0].rule).toEqual({ method: "amount", value: 500 });
+  });
+});
+
+describe("activityPaid", () => {
+  it("counts tagged payments and moves member-to-member payments to the payer", () => {
+    const r = activityPaid([
+      { payerId: "a", payeeId: null, amount: 1_000 },
+      { payerId: "b", payeeId: "a", amount: 400 },
+    ]);
+    expect(r.paid).toEqual({ a: 600, b: 400 });
+    expect(r.intoGroup).toBe(1_000);
+  });
+});
+
+describe("groupLedger", () => {
+  it("carries credit across activities and deducts payments received", () => {
+    const shares = { method: "shares" as const, value: 1 };
+    const members = [
+      { userId: "a", isPaying: true, startsOn: day("2026-01-01"), rule: shares },
+      { userId: "b", isPaying: true, startsOn: day("2026-01-01"), rule: shares },
+    ];
+    const ledger = groupLedger({
+      members,
+      activities: [
+        { id: "x", startsOn: day("2026-02-01"), total: 1_000 },
+        { id: "y", startsOn: day("2026-03-01"), total: 600 },
+      ],
+      entries: [],
+      // a put 2000 into the group; b paid a back 300.
+      payments: [
+        { userId: "a", paidOut: 2_000, received: 300 },
+        { userId: "b", paidOut: 300, received: 0 },
+      ],
+    });
+    expect(ledger.byUser.a).toEqual({ due: 800, paid: 1_700, balance: 900 });
+    expect(ledger.byUser.b).toEqual({ due: 800, paid: 300, balance: -500 });
+    expect(ledger.cash).toBe(400);
+  });
+});
+
+describe("activitySummary", () => {
+  it("lists participants and payers with what is left or paid extra", () => {
+    const split = { total: 300, dues: { a: 100, b: 200 }, unset: [], unassigned: 0 };
+    const covered = activityPaid([
+      { payerId: "a", payeeId: null, amount: 150 },
+      { payerId: "c", payeeId: null, amount: 20 },
+    ]);
+    const r = activitySummary(split, covered);
+    expect(r.rows).toEqual([
+      { userId: "a", due: 100, paid: 150, left: -50 },
+      { userId: "b", due: 200, paid: 0, left: 200 },
+      { userId: "c", due: 0, paid: 20, left: -20 },
+    ]);
+    expect([r.outstanding, r.extra, r.collected]).toEqual([200, 70, 170]);
+  });
+});
+
+describe("closed activity", () => {
+  it("uses only the frozen activity_members rows, ignoring paying members' live rules", () => {
+    const members = [
+      { userId: "a", isPaying: true, startsOn: day("2026-01-01"), rule: { method: "shares" as const, value: 1 } },
+      { userId: "b", isPaying: true, startsOn: day("2026-01-01"), rule: { method: "shares" as const, value: 1 } },
+    ];
+    const activity = { id: "x", startsOn: day("2026-02-01"), total: 300, closed: true };
+    const entries = [{ activityId: "x", userId: "a", rule: { method: "amount" as const, value: 300 } }];
+    expect(activityParticipants(activity, members, entries)).toEqual([{ userId: "a", rule: { method: "amount", value: 300 } }]);
+    expect(activityParticipants({ ...activity, closed: false }, members, entries).map((p) => p.userId)).toEqual(["a", "b"]);
+  });
+});

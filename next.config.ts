@@ -5,13 +5,8 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ["@prisma/client", "prisma"],
-  eslint: { ignoreDuringBuilds: true },
-  images: {
-    remotePatterns: [
-      { protocol: "https", hostname: "*.supabase.co" },
-      { protocol: "https", hostname: "*.supabase.in" },
-    ],
-  },
+  // Receipts are capped at 4 MB in storage.ts; Netlify functions accept up to 6 MB per request.
+  experimental: { serverActions: { bodySizeLimit: "5mb" } },
 };
 
 export default withNextIntl(nextConfig);

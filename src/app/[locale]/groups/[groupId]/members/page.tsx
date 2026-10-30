@@ -1,178 +1,106 @@
-import { requirePageUser } from "@/lib/page-auth";
-import { Brand, BottomNav } from "@/components/shell";
-import { Field, SubmitButton } from "@/components/forms";
+import { getLocale, getTranslations } from "next-intl/server";
 import { addMember, removeMember, updateMember } from "@/actions/groups";
-import { getTranslations } from "next-intl/server";
-import { notFound } from "next/navigation";
-import { isAdminRole } from "@/lib/quota";
-import { ServerFormAction } from "@/lib/utils";
-import { formatMoney, fromMinor } from "@/lib/money";
-import { getLocale } from "next-intl/server";
-import { KafuMark } from "@/components/kafu-mark";
-import { MemberIdentifierFields } from "@/components/member-identifier-fields";
-import { MembersTabs } from "@/components/members-tabs";
-import { Link } from "@/i18n/routing";
-import { formatDateTime } from "@/lib/dates";
-import {
-  getGroupInvites,
-  getGroupMemberPaymentMethods,
-  getGroupMembers,
-  getGroupMembership,
-} from "@/lib/workspace";
+import { ActionForm, Field, Hidden, Select, SplitFields, SubmitButton } from "@/components/forms";
+import { Fold, GroupPage, Section } from "@/components/page";
+import { formatDay, isoDay, ruleInput, ruleText } from "@/lib/format";
+import { pageGroup } from "@/server/guard";
+import type { GroupMemberView } from "@/server/queries";
 
 export default async function MembersPage({ params }: { params: Promise<{ groupId: string }> }) {
-  const user = await requirePageUser();
   const { groupId } = await params;
-  const membership = await getGroupMembership(groupId, user.id);
-  if (!membership) notFound();
-  const admin = isAdminRole(membership.role);
-  const t = await getTranslations("group");
-  const locale = await getLocale();
-  const [members, invites, methods] = await Promise.all([
-    getGroupMembers(groupId),
-    getGroupInvites(groupId),
-    getGroupMemberPaymentMethods(groupId),
-  ]);
-  const app = process.env.APP_URL ?? "";
-  const methodsByUser = new Map<string, string[]>();
-  for (const m of methods) {
-    const list = methodsByUser.get(m.userId) ?? [];
-    list.push(m.label);
-    methodsByUser.set(m.userId, list);
-  }
-
-  const addPanel = (
-    <form action={addMember as ServerFormAction} className="card space-y-3 p-4">
-      <p className="text-sm text-ink/55">{t("inviteHint")}</p>
-      <input type="hidden" name="groupId" value={groupId} />
-      <MemberIdentifierFields />
-      <label className="block space-y-1 text-sm">
-        <span>{t("role")}</span>
-        <select name="role" className="field" defaultValue="member">
-          <option value="member">{t("member")}</option>
-          <option value="admin">{t("admin")}</option>
-        </select>
-      </label>
-      <KafuMark withCheckbox />
-      <Field name="defaultShare" label={t("share")} defaultValue="1" />
-      <Field name="defaultPercentage" label={t("percentage")} />
-      <Field name="defaultAmount" label={t("amount")} />
-      <SubmitButton>{t("addMember")}</SubmitButton>
-    </form>
-  );
-
-  const managePanel = (
-    <div className="space-y-3">
-      {members.map((mem) => {
-        const invite = invites.find((i) => i.userId === mem.userId);
-        const labels = methodsByUser.get(mem.userId) ?? [];
-        return (
-          <div key={mem.userId} className="card p-4">
-            <div className="flex items-start justify-between gap-2">
-              <Link href={`/groups/${groupId}/members/${mem.userId}`} className="min-w-0 flex-1">
-                <div className="font-semibold">{mem.user.name}</div>
-                <div className="mt-1 space-y-0.5 text-xs text-ink/60">
-                  {mem.user.phone && (
-                    <div dir="ltr">
-                      {t("phone")}: {mem.user.phone}
-                    </div>
-                  )}
-                  {mem.user.email && (
-                    <div dir="ltr">
-                      {t("email")}: {mem.user.email}
-                    </div>
-                  )}
-                  <div>
-                    {t("paymentMethods")}: {labels.length ? labels.join(" · ") : t("noPaymentMethods")}
-                  </div>
-                  <div>
-                    {t("invitedAt")}: {formatDateTime(mem.invitedAt, locale) ?? "—"}
-                  </div>
-                  <div>
-                    {t("firstEnteredAt")}: {formatDateTime(mem.firstEnteredAt, locale) ?? t("neverEntered")}
-                  </div>
-                  {admin && (
-                    <>
-                      <div>
-                        {t("role")}: {t(mem.role)}
-                      </div>
-                      <div>
-                        {t("status")}: {t(`userStatus.${mem.user.status}`)}
-                      </div>
-                      <div className="text-teal">
-                        {formatMoney(mem.netAmount, membership.group.currency, locale)} · {t("due")}{" "}
-                        {formatMoney(mem.dueAmount, membership.group.currency, locale)}
-                      </div>
-                    </>
-                  )}
-                </div>
-              </Link>
-              <div className="flex shrink-0 flex-col items-end gap-1">
-                {admin &&
-                  (mem.isPayingUser ? (
-                    <KafuMark active />
-                  ) : (
-                    <span className="text-[11px] text-ink/40">{t("notPaying")}</span>
-                  ))}
-                <Link href={`/groups/${groupId}/members/${mem.userId}`} className="text-xs text-teal">
-                  {t("viewMember")}
-                </Link>
-              </div>
-            </div>
-            {admin && (
-              <form action={updateMember as ServerFormAction} className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                <input type="hidden" name="groupId" value={groupId} />
-                <input type="hidden" name="userId" value={mem.userId} />
-                <select name="role" className="field" defaultValue={mem.role}>
-                  <option value="member">{t("member")}</option>
-                  <option value="admin">{t("admin")}</option>
-                  {mem.role === "owner" && <option value="owner">{t("owner")}</option>}
-                </select>
-                <KafuMark withCheckbox defaultChecked={mem.isPayingUser} />
-                <input name="defaultShare" className="field" defaultValue={mem.defaultShare} />
-                <input
-                  name="defaultPercentage"
-                  className="field"
-                  defaultValue={mem.defaultPercentage ? String(mem.defaultPercentage) : ""}
-                  placeholder="%"
-                />
-                <input
-                  name="defaultAmount"
-                  className="field col-span-2"
-                  defaultValue={
-                    mem.defaultAmount != null
-                      ? String(fromMinor(mem.defaultAmount, membership.group.currency))
-                      : ""
-                  }
-                  placeholder={t("amount")}
-                />
-                <SubmitButton className="btn btn-primary">{t("save")}</SubmitButton>
-              </form>
-            )}
-            {admin && mem.role !== "owner" && (
-              <form action={removeMember as ServerFormAction} className="mt-2">
-                <input type="hidden" name="groupId" value={groupId} />
-                <input type="hidden" name="userId" value={mem.userId} />
-                <button className="text-sm text-rose">{t("remove")}</button>
-              </form>
-            )}
-            {invite && (
-              <p className="mt-2 break-all text-[11px] text-ink/40" dir="ltr">
-                {app}/{locale}/invite/{invite.token}
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+  const { group, admin } = await pageGroup(groupId);
+  const [t, locale] = await Promise.all([getTranslations(), getLocale()]);
+  const ruleT = (key: "sharesN" | "percentN", v: { n: string }) => t(`split.${key}`, v);
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-lg flex-col px-4 pt-5">
-      <Brand compact showRefresh refreshGroupId={groupId} />
-      <h1 className="mt-6 text-2xl font-bold">{t("membersTitle")}</h1>
-      <MembersTabs canAdd={admin} addPanel={addPanel} managePanel={managePanel} />
-      <BottomNav />
-    </div>
+    <GroupPage group={group}>
+      <p className="text-xs text-ink/60">{t("member.rulesHint")}</p>
+      <Section title={t("nav.members")}>
+        <ul className="card divide-y divide-line">
+          {group.members.map((m) => (
+            <li key={m.userId} className="px-4 py-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{m.name}</div>
+                  <div className="truncate text-xs text-ink/50" dir="auto">
+                    {m.contact}
+                  </div>
+                </div>
+                <div className="shrink-0 text-end text-xs">
+                  <div className={m.isPaying ? "text-teal" : "text-ink/50"}>
+                    {m.isPaying ? t("member.paying") : t("member.other")}
+                    {m.role !== "member" && ` · ${t(`roles.${m.role}`)}`}
+                  </div>
+                  <div className="text-ink/50">
+                    {ruleText(m.rule, group.currency, locale, ruleT) ?? t("split.none")}
+                    {m.isPaying && ` · ${t("member.from")} ${formatDay(m.startsOn, locale)}`}
+                  </div>
+                </div>
+              </div>
+              {admin && <MemberEditor groupId={groupId} member={m} currency={group.currency} t={t} />}
+            </li>
+          ))}
+        </ul>
+      </Section>
+
+      {admin && (
+        <Fold label={t("member.add")}>
+          <ActionForm action={addMember}>
+            <Hidden values={{ groupId }} />
+            <Field label={t("auth.name")} name="name" required maxLength={80} />
+            <Field label={t("auth.identifier")} name="identifier" dir="ltr" placeholder="you@example.com · 05xxxxxxxx" required />
+            <MemberFields t={t} />
+            <SubmitButton>{t("member.add")}</SubmitButton>
+          </ActionForm>
+        </Fold>
+      )}
+    </GroupPage>
+  );
+}
+
+type T = Awaited<ReturnType<typeof getTranslations>>;
+
+function MemberFields({ t, member, currency }: { t: T; member?: GroupMemberView; currency?: string }) {
+  const rule = member && currency ? ruleInput(member.rule, currency) : { method: "shares", value: "1" };
+  return (
+    <>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" name="isPaying" defaultChecked={member?.isPaying ?? true} className="size-4 accent-teal" />
+        {t("member.payingLabel")}
+      </label>
+      <Field
+        label={t("member.startsOn")}
+        name="startsOn"
+        type="date"
+        defaultValue={isoDay(member?.startsOn ?? new Date())}
+      />
+      <SplitFields method={rule.method} value={rule.value} />
+    </>
+  );
+}
+
+function MemberEditor({ groupId, member, currency, t }: { groupId: string; member: GroupMemberView; currency: string; t: T }) {
+  const ids = { groupId, userId: member.userId };
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-xs text-teal">{t("common.edit")}</summary>
+      <ActionForm action={updateMember} className="mt-2 space-y-2" reset={false}>
+        <Hidden values={ids} />
+        <MemberFields t={t} member={member} currency={currency} />
+        {member.role !== "owner" && (
+          <Select label={t("member.role")} name="role" defaultValue={member.role}>
+            <option value="member">{t("roles.member")}</option>
+            <option value="admin">{t("roles.admin")}</option>
+          </Select>
+        )}
+        <SubmitButton>{t("common.save")}</SubmitButton>
+      </ActionForm>
+      {member.role !== "owner" && (
+        <ActionForm action={removeMember} className="mt-2" confirm={t("member.confirmRemove")}>
+          <Hidden values={ids} />
+          <SubmitButton className="btn btn-ghost w-full text-xs text-rose">{t("member.remove")}</SubmitButton>
+        </ActionForm>
+      )}
+    </details>
   );
 }

@@ -1,138 +1,72 @@
 "use server";
 
-import { prisma } from "@/lib/db";
-import { detectIdentifier } from "@/lib/identity";
-import { isAnonymousPhone } from "@/lib/anonymous";
-import { hashOtp, OTP_DAILY_SEND_CAP, OTP_MAX_ATTEMPTS, randomOtp, verifyOtpHash } from "@/lib/otp";
-import { sendEmail } from "@/lib/email";
-import { sendWhatsApp } from "@/lib/whatsapp";
-import { createSession, destroySession } from "@/lib/session";
-import { warmAfterLogin } from "@/lib/workspace";
 import { redirect } from "next/navigation";
+import { prisma } from "@/server/db";
+import { identifierOf, parseIdentifier, send, userKey } from "@/server/channels";
+import { hashOtp, OTP_DAILY_CAP, OTP_MAX_ATTEMPTS, OTP_TTL_MS, randomOtp, verifyOtpHash } from "@/server/otp";
+import { createSession, destroySession } from "@/server/session";
 
-export type OtpRequestResult =
-  | { ok: true; message: string; knownName: string | null }
-  | { ok: false; error: string };
+type Result = { ok: true; newUser: boolean } | { ok: false; error: string };
 
-export type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
-function startOfUtcDay(now = new Date()) {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-}
+/** Queries: users by unique identifier; otp count in the last 24h (index identifier, created_at); one insert. */
+export async function requestCode(rawIdentifier: string): Promise<Result> {
+  const to = parseIdentifier(rawIdentifier);
+  if (!to) return { ok: false, error: "invalid_identifier" };
+  const identifier = identifierOf(to);
 
-export async function requestOtp(formData: FormData): Promise<OtpRequestResult> {
-  const raw = String(formData.get("identifier") ?? "");
-  const detected = detectIdentifier(raw);
-  if (!detected) return { ok: false, error: "invalid_identifier" };
-  if (detected.phone && isAnonymousPhone(detected.phone)) return { ok: false, error: "invalid_identifier" };
-
-  const channel = detected.email ? "email" : "whatsapp";
-  const identifier = detected.email ?? detected.phone!;
-
-  const user = detected.email
-    ? await prisma.user.findUnique({ where: { email: detected.email } })
-    : await prisma.user.findUnique({ where: { phone: detected.phone } });
-
-  const sentToday = await prisma.otpChallenge.count({
-    where: { identifier, createdAt: { gte: startOfUtcDay() } },
-  });
-  if (sentToday >= OTP_DAILY_SEND_CAP) return { ok: false, error: "too_many_otp" };
+  const [user, recent] = await Promise.all([
+    prisma.user.findUnique({ where: userKey(to), select: { id: true } }),
+    prisma.otpChallenge.count({ where: { identifier, createdAt: { gte: new Date(Date.now() - 86_400_000) } } }),
+  ]);
+  if (recent >= OTP_DAILY_CAP) return { ok: false, error: "too_many_codes" };
 
   const code = randomOtp();
-  const codeHash = await hashOtp(code);
-  await prisma.otpChallenge.create({
-    data: {
-      userId: user?.id,
-      identifier,
-      channel,
-      codeHash,
-      expiresAt: new Date("9999-12-31T23:59:59.000Z"),
-    },
-  });
-
-  const app = process.env.APP_URL ?? "http://localhost:3000";
   try {
-    if (channel === "email") {
-      await sendEmail(identifier, "رمز الدخول — قطة", `رمزك: ${code}\n${app}`);
-    } else {
-      const tpl = process.env.WHATSAPP_OTP_TEMPLATE;
-      await sendWhatsApp(
-        identifier,
-        `رمز قطة: ${code}`,
-        tpl ? { name: tpl, params: [code] } : undefined,
-      );
-    }
+    await send(to, "Qattah code / رمز قطة", `${code}\n\nقطة — رمز الدخول · Qattah sign-in code`);
   } catch (e) {
-    console.error(e);
-    return { ok: false, error: "send_failed" };
+    const msg = e instanceof Error ? e.message : "";
+    return { ok: false, error: msg === "telegram_not_linked" ? msg : "send_failed" };
   }
-
-  const knownName = user?.name?.trim() ? user.name.trim() : null;
-  return { ok: true, message: identifier, knownName };
+  await prisma.otpChallenge.create({
+    data: { identifier, channel: to.channel, codeHash: await hashOtp(code), expiresAt: new Date(Date.now() + OTP_TTL_MS) },
+  });
+  return { ok: true, newUser: !user };
 }
 
-export async function verifyOtp(formData: FormData): Promise<ActionResult> {
-  const raw = String(formData.get("identifier") ?? "");
-  const code = String(formData.get("code") ?? "").trim();
-  const name = String(formData.get("name") ?? "").trim();
-  const locale = String(formData.get("locale") ?? "ar");
-  const detected = detectIdentifier(raw);
-  if (!detected) return { ok: false, error: "invalid_identifier" };
-  if (detected.phone && isAnonymousPhone(detected.phone)) return { ok: false, error: "invalid_identifier" };
-  if (!/^\d{6}$/.test(code)) return { ok: false, error: "invalid_code" };
+/** Queries: latest challenge for the identifier; attempt update or delete; user find/create; session insert. */
+export async function verifyCode(input: { identifier: string; code: string; name?: string; locale: string }): Promise<Result> {
+  const to = parseIdentifier(input.identifier);
+  if (!to) return { ok: false, error: "invalid_identifier" };
+  if (!/^\d{6}$/.test(input.code)) return { ok: false, error: "invalid_code" };
+  const identifier = identifierOf(to);
 
-  const identifier = detected.email ?? detected.phone!;
   const challenge = await prisma.otpChallenge.findFirst({
-    where: { identifier },
+    where: { identifier, expiresAt: { gt: new Date() } },
     orderBy: { createdAt: "desc" },
+    select: { id: true, codeHash: true, attempts: true },
   });
-  if (!challenge) return { ok: false, error: "no_challenge" };
-  if (challenge.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, error: "too_many_attempts" };
-
-  const match = await verifyOtpHash(code, challenge.codeHash);
-  if (!match) {
-    await prisma.otpChallenge.update({
-      where: { id: challenge.id },
-      data: { attempts: { increment: 1 } },
-    });
+  if (!challenge || challenge.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, error: "code_expired" };
+  if (!(await verifyOtpHash(input.code, challenge.codeHash))) {
+    await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: { increment: 1 } } });
     return { ok: false, error: "wrong_code" };
   }
 
-  let user = detected.email
-    ? await prisma.user.findUnique({ where: { email: detected.email } })
-    : await prisma.user.findUnique({ where: { phone: detected.phone } });
-
+  let user = await prisma.user.findUnique({ where: userKey(to), select: { id: true } });
   if (!user) {
+    const name = input.name?.trim();
     if (!name) return { ok: false, error: "name_required" };
     user = await prisma.user.create({
-      data: {
-        name,
-        locale: locale === "en" ? "en" : "ar",
-        status: "active",
-        claimedAt: new Date(),
-        email: detected.email,
-        phone: detected.phone,
-      },
-    });
-  } else if (user.status === "disabled") {
-    return { ok: false, error: "invalid_identifier" };
-  } else if (user.status !== "active") {
-    user = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        status: "active",
-        claimedAt: new Date(),
-        locale: locale === "en" ? "en" : user.locale,
-      },
+      data: { name: name.slice(0, 80), locale: input.locale === "en" ? "en" : "ar", ...userKey(to) },
+      select: { id: true },
     });
   }
-
+  await prisma.otpChallenge.deleteMany({ where: { identifier } });
   await createSession(user.id);
-  void warmAfterLogin(user.id);
-  return { ok: true };
+  return { ok: true, newUser: false };
 }
 
-export async function logout() {
+export async function logout(locale: string) {
   await destroySession();
-  redirect("/");
+  redirect(`/${locale === "en" ? "en" : "ar"}/login`);
 }

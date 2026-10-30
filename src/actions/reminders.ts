@@ -1,116 +1,48 @@
 "use server";
 
-import { prisma } from "@/lib/db";
-import { requireUser } from "@/lib/session";
-import { getMembership } from "@/lib/balances";
-import { isAdminRole, remainingQuota, canSend } from "@/lib/quota";
-import { sendEmail } from "@/lib/email";
-import { sendWhatsApp } from "@/lib/whatsapp";
+import { z } from "zod";
+import { prisma } from "@/server/db";
+import { actionMember, ActionError } from "@/server/guard";
+import { f, formAction } from "@/server/action";
+import { destinationOf, send } from "@/server/channels";
+import { computeGroupLedger } from "@/server/group-ledger";
+import { loadGroup } from "@/server/queries";
+import { REMINDER_COOLDOWN_HOURS } from "@/lib/limits";
 import { formatMoney } from "@/lib/money";
-import { collectedOf } from "@/lib/ledger";
-import { revalidatePath } from "next/cache";
 
-export type ActionResult =
-  | { ok: true; remaining: { hourLeft: number; dayLeft: number } }
-  | { ok: false; error: string };
-
-type Channel = "whatsapp" | "email";
-
-export async function sendReminder(formData: FormData): Promise<ActionResult> {
-  const user = await requireUser();
-  const groupId = String(formData.get("groupId") ?? "");
-  const m = await getMembership(groupId, user.id);
-  if (!m || !isAdminRole(m.role)) return { ok: false, error: "forbidden" };
-
-  const quota = await remainingQuota(groupId);
-  if (!canSend(quota)) return { ok: false, error: "quota_exceeded" };
-
-  const body = String(formData.get("body") ?? "").trim();
-  if (!body) return { ok: false, error: "body_required" };
-
-  const channels = formData
-    .getAll("channels")
-    .map((c) => String(c))
-    .filter((c): c is Channel => c === "whatsapp" || c === "email");
-  if (channels.length === 0) return { ok: false, error: "no_channel" };
-
-  const targetType = String(formData.get("targetType") ?? "group");
-  const targetId = String(formData.get("targetId") ?? "") || null;
-  const recipientIds = String(formData.get("recipientIds") ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const members = await prisma.groupMember.findMany({
-    where: {
-      groupId,
-      ...(recipientIds.length ? { userId: { in: recipientIds } } : {}),
-    },
-    include: { user: true },
+/**
+ * Admin sends a member what they owe, by email or Telegram.
+ * Queries: membership check; last reminder (index group_id, user_id, sent_at); group with members; ledger (3); one INSERT.
+ */
+export const sendReminder = formAction(z.object({ groupId: f.id, userId: f.id }), async ({ groupId, userId }) => {
+  const { user } = await actionMember(groupId, { admin: true });
+  const last = await prisma.reminder.findFirst({
+    where: { groupId, userId, sentAt: { gt: new Date(Date.now() - REMINDER_COOLDOWN_HOURS * 3_600_000) } },
+    select: { id: true },
   });
+  if (last) throw new ActionError("reminder_too_soon");
 
-  const jobs: { channel: Channel; to: string; userId: string }[] = [];
-  for (const mem of members) {
-    for (const channel of channels) {
-      const to = channel === "email" ? mem.user.email : mem.user.phone;
-      if (to) jobs.push({ channel, to, userId: mem.userId });
-    }
+  const groupP = loadGroup(groupId, user.id);
+  const [group, ledger] = await Promise.all([groupP, computeGroupLedger(groupId, groupP)]);
+  const target = group?.members.find((m) => m.userId === userId);
+  if (!group || !ledger || !target) throw new ActionError("not_member");
+  const { byUser } = ledger;
+  const owed = -(byUser[userId]?.balance ?? 0);
+  if (owed <= 0) throw new ActionError("nothing_owed");
+
+  const ar = target.locale === "ar";
+  const amount = formatMoney(owed, group.currency, target.locale);
+  const link = `${process.env.APP_URL ?? ""}/${target.locale}/groups/${groupId}/payments`;
+  const text = ar
+    ? `تذكير من ${group.name}: عليك ${amount}.\nطرق الدفع وتسجيل الدفعة: ${link}`
+    : `Reminder from ${group.name}: you owe ${amount}.\nPay and record it here: ${link}`;
+  const to = destinationOf(target);
+  if (!to) throw new ActionError("no_contact");
+
+  try {
+    await send(to, ar ? `تذكير — ${group.name}` : `Reminder — ${group.name}`, text);
+  } catch (e) {
+    throw new ActionError(e instanceof Error && e.message === "telegram_not_linked" ? "telegram_not_linked" : "send_failed");
   }
-
-  if (jobs.length === 0) return { ok: false, error: "no_recipients" };
-
-  let sent = 0;
-  for (const job of jobs) {
-    const left = await remainingQuota(groupId);
-    if (!canSend(left)) {
-      if (sent === 0) return { ok: false, error: "quota_exceeded" };
-      break;
-    }
-    try {
-      if (job.channel === "email") {
-        await sendEmail(job.to, "قطة", body);
-      } else {
-        await sendWhatsApp(job.to, body);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    await prisma.notificationLog.create({
-      data: {
-        groupId,
-        actorUserId: user.id,
-        channel: job.channel,
-        targetType,
-        targetId,
-        recipient: job.to,
-        body,
-      },
-    });
-    sent += 1;
-  }
-
-  revalidatePath(`/groups/${groupId}`);
-  return { ok: true, remaining: await remainingQuota(groupId) };
-}
-
-export async function expenseCollectTemplate(groupId: string, expenseId: string, locale: string) {
-  const expense = await prisma.expense.findFirst({
-    where: { id: expenseId, groupId },
-    include: {
-      group: true,
-      shares: true,
-      payers: true,
-      allocations: { include: { payment: true } },
-    },
-  });
-  if (!expense) return "";
-  const collected = collectedOf(expense);
-  const left = Math.max(0, expense.amount - collected);
-  const app = process.env.APP_URL ?? "";
-  const moneyLeft = formatMoney(left, expense.group.currency, locale);
-  const total = formatMoney(expense.amount, expense.group.currency, locale);
-  if (locale === "en") {
-    return `Reminder from ${expense.group.name}: "${expense.title}" still needs ${moneyLeft} of ${total}. Pay here: ${app}`;
-  }
-  return `تذكير من مجموعة ${expense.group.name}: المصروف «${expense.title}» ما اكتمل بعد. المتبقي ${moneyLeft} من أصل ${total}. ادفع من هنا: ${app}`;
-}
+  await prisma.reminder.create({ data: { groupId, userId, sentById: user.id, channel: to.channel, amount: owed } });
+});

@@ -1,109 +1,99 @@
-import { NextRequest, NextResponse } from "next/server";
-import ExcelJS from "exceljs";
-import { getSessionUser } from "@/lib/session";
-import { isAdminRole } from "@/lib/quota";
-import { fromMinor } from "@/lib/money";
-import { collectedOf, collectionStatus, displayedBaseline } from "@/lib/ledger";
 import { getTranslations } from "next-intl/server";
-import {
-  getGroupExpenses,
-  getGroupMembers,
-  getGroupMembership,
-  getGroupPayments,
-} from "@/lib/workspace";
+import { toCsv } from "@/lib/csv";
+import { isoDay } from "@/lib/format";
+import { fromMinor } from "@/lib/money";
+import { activityPaid, activityParticipants, activitySummary, splitActivity } from "@/lib/ledger";
+import { computeGroupLedger } from "@/server/group-ledger";
+import { ledgerMembers, listEntries, listExpenses, listPayments, loadActivity, loadGroup } from "@/server/queries";
+import { getSessionUser } from "@/server/session";
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: Promise<{ groupId: string }> },
-) {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+/**
+ * GET ?kind=summary   one row per member: paid, due, balance (same ledger as the screens).
+ * GET ?kind=transactions   every expense and payment, oldest first.
+ * With &activityId=… both kinds are scoped to that activity (same calculation as its screen).
+ * Amounts are in major units (e.g. 12.50) so spreadsheets can sum them.
+ */
+export async function GET(req: Request, { params }: { params: Promise<{ groupId: string }> }) {
   const { groupId } = await params;
-  const membership = await getGroupMembership(groupId, user.id);
-  if (!membership) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  const url = new URL(req.url);
+  const kind = url.searchParams.get("kind") === "transactions" ? "transactions" : "summary";
+  const locale = url.searchParams.get("locale") === "en" ? "en" : "ar";
 
-  const locale = user.locale === "en" ? "en" : "ar";
-  const t = await getTranslations({ locale, namespace: "report" });
-  const admin = isAdminRole(membership.role);
-  const activityId = req.nextUrl.searchParams.get("activityId");
-  const expenseId = req.nextUrl.searchParams.get("expenseId");
-  const userId = req.nextUrl.searchParams.get("userId");
+  const user = await getSessionUser();
+  if (!user) return new Response("unauthenticated", { status: 401 });
+  const group = await loadGroup(groupId, user.id);
+  if (!group) return new Response("not found", { status: 404 });
 
-  const [members, allExpenses, allPayments] = await Promise.all([
-    getGroupMembers(groupId),
-    getGroupExpenses(groupId),
-    getGroupPayments(groupId),
-  ]);
-  if (userId && !members.some((m) => m.userId === userId)) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
-  }
+  const t = await getTranslations({ locale });
+  const major = (v: number) => fromMinor(v, group.currency);
+  const names = new Map(group.members.map((m) => [m.userId, m.name]));
+  let rows: (string | number | null)[][];
+  let scope = kind as string;
 
-  const expenses = allExpenses.filter(
-    (e) =>
-      e.approvalStatus === "approved" &&
-      (!activityId || e.activityId === activityId) &&
-      (!expenseId || e.id === expenseId) &&
-      (!userId ||
-        e.shares.some((s) => s.userId === userId && s.included) ||
-        e.payers.some((p) => p.userId === userId) ||
-        e.allocations.some((a) => a.payment?.payerUserId === userId)),
-  );
-  const payments = allPayments.filter(
-    (p) => p.approvalStatus === "approved" && (!userId || p.payerUserId === userId),
-  );
-  const exportMembers = userId ? members.filter((m) => m.userId === userId) : members;
-
-  const wb = new ExcelJS.Workbook();
-  const cur = membership.group.currency;
-  const bal = wb.addWorksheet(t("balances"));
-  bal.addRow(
-    admin
-      ? [t("colName"), t("colPhone"), t("colEmail"), t("colPaying"), t("colDue"), t("colPaid"), t("colNet")]
-      : [t("colName"), t("colPhone"), t("colEmail"), t("colDue"), t("colPaid"), t("colNet")],
-  );
-  for (const m of exportMembers) {
-    const row: (string | number | boolean | null | undefined)[] = [m.user.name, m.user.phone, m.user.email];
-    if (admin) row.push(m.isPayingUser);
-    row.push(fromMinor(m.dueAmount, cur), fromMinor(m.paidAmount, cur), fromMinor(m.netAmount, cur));
-    bal.addRow(row);
-  }
-  const ex = wb.addWorksheet(t("expenses"));
-  ex.addRow([t("colActivity"), t("colTitle"), t("colAmount"), t("colSplit"), t("colStatus")]);
-  for (const e of expenses) {
-    ex.addRow([
-      e.activity.title,
-      e.title,
-      fromMinor(e.amount, cur),
-      e.splitMethod,
-      collectionStatus(e.amount, collectedOf(e)),
-    ]);
-  }
-  const sh = wb.addWorksheet(t("shares"));
-  sh.addRow([t("colExpense"), t("colUser"), t("colDue"), t("colBaseline")]);
-  for (const e of expenses) {
-    for (const s of e.shares) {
-      if (userId && s.userId !== userId) continue;
-      const mem = members.find((m) => m.userId === s.userId);
-      const collected = collectedOf(e);
-      sh.addRow([
-        e.title,
-        mem?.user.name,
-        fromMinor(s.dueAmount, cur),
-        fromMinor(displayedBaseline(s.baselineAmount, collected, e.amount), cur),
-      ]);
+  const activityId = url.searchParams.get("activityId");
+  if (activityId) {
+    const [activity, entries] = await Promise.all([loadActivity(groupId, activityId), listEntries(groupId, activityId)]);
+    if (!activity) return new Response("not found", { status: 404 });
+    scope = `${activity.title}-${kind}`;
+    const expenses = activity.expenses.filter((e) => e.approvedAt);
+    const payments = activity.payments.filter((p) => p.approvedAt);
+    if (kind === "summary") {
+      const total = expenses.reduce((sum, e) => sum + e.amount, 0);
+      const split = splitActivity(total, activityParticipants({ ...activity, total }, ledgerMembers(group), entries));
+      const report = activitySummary(split, activityPaid(payments));
+      rows = [
+        [t("report.member"), t("ledger.due"), t("ledger.paid"), t("activity.left"), group.currency],
+        ...report.rows.map((row) => [names.get(row.userId) ?? null, major(row.due), major(row.paid), major(row.left), null]),
+      ];
+    } else {
+      rows = [
+        [t("report.date"), t("report.type"), t("report.description"), t("payment.payer"), t("payment.payee"), `${t("expense.amount")} (${group.currency})`],
+        ...expenses.map((e) => [isoDay(activity.startsOn), t("expense.title"), e.title, null, null, major(e.amount)]),
+        ...payments.map((p) => [
+          isoDay(p.paidOn),
+          t("nav.payments"),
+          p.note,
+          names.get(p.payerId) ?? null,
+          p.payeeId ? (names.get(p.payeeId) ?? null) : t("payment.toGroup"),
+          major(p.amount),
+        ]),
+      ];
     }
-  }
-  const pay = wb.addWorksheet(t("payments"));
-  pay.addRow([t("colPayer"), t("colAmount"), t("colNotes"), t("colPaidAt")]);
-  for (const p of payments) {
-    pay.addRow([p.payer.name, fromMinor(p.amount, cur), p.notes, p.paidAt.toISOString()]);
+  } else if (kind === "summary") {
+    const { byUser } = (await computeGroupLedger(groupId, group))!;
+    rows = [
+      [t("report.member"), t("ledger.paid"), t("ledger.due"), t("report.balance"), group.currency],
+      ...group.members.map((m) => {
+        const b = byUser[m.userId];
+        return [m.name, major(b.paid), major(b.due), major(b.balance), null];
+      }),
+    ];
+  } else {
+    const [expenses, payments] = await Promise.all([listExpenses(groupId), listPayments(groupId)]);
+    rows = [
+      [t("report.date"), t("report.type"), t("report.activity"), t("report.description"), t("payment.payer"), t("payment.payee"), `${t("expense.amount")} (${group.currency})`],
+      ...expenses.map((e) => [isoDay(e.startsOn), t("expense.title"), e.activity, e.title, null, null, major(e.amount)]),
+      ...payments
+        .filter((p) => p.approvedAt)
+        .reverse()
+        .map((p) => [
+          isoDay(p.paidOn),
+          t("nav.payments"),
+          p.activity?.title ?? null,
+          p.note,
+          names.get(p.payerId) ?? null,
+          p.payeeId ? (names.get(p.payeeId) ?? null) : t("payment.toGroup"),
+          major(p.amount),
+        ]),
+    ];
   }
 
-  const buf = await wb.xlsx.writeBuffer();
-  return new NextResponse(Buffer.from(buf), {
+  const filename = `${`${group.name}-${scope}`.replace(/[^\p{L}\p{N}]+/gu, "-")}-${isoDay(new Date())}.csv`;
+  return new Response(toCsv(rows), {
     headers: {
-      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="qattah-${userId ? `member-${userId.slice(0, 8)}` : groupId.slice(0, 8)}.xlsx"`,
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      "cache-control": "private, no-store",
     },
   });
 }
