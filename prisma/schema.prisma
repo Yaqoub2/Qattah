@@ -1,0 +1,363 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserStatus {
+  invited
+  active
+  disabled
+}
+
+enum GroupRole {
+  owner
+  admin
+  member
+}
+
+enum SplitMethod {
+  equal
+  shares
+  percentage
+  amount
+}
+
+enum ActivityStatus {
+  open
+  closed
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+}
+
+model User {
+  id        String     @id @default(uuid()) @db.Uuid
+  phone     String?    @unique
+  email     String?    @unique
+  name      String
+  locale    String     @default("ar")
+  status    UserStatus @default(invited)
+  claimedAt DateTime?  @map("claimed_at")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  memberships      GroupMember[]
+  paymentMethods   UserPaymentMethod[]
+  payments         Payment[]
+  createdGroups    Group[]             @relation("GroupCreator")
+  createdActivities Activity[]         @relation("ActivityCreator")
+  createdExpenses  Expense[]           @relation("ExpenseCreator")
+  otps             OtpChallenge[]
+  sessions         Session[]
+  auditLogs        GroupAuditLog[]
+  expensePayers    ExpensePayer[]
+  notifications    NotificationLog[]
+  inviteTokens     InviteToken[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model OtpChallenge {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  identifier String
+  channel    String
+  codeHash   String   @map("code_hash")
+  attempts   Int      @default(0)
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([identifier, createdAt])
+  @@map("otp_challenges")
+}
+
+model InviteToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  token     String   @unique
+  userId    String   @map("user_id") @db.Uuid
+  groupId   String   @map("group_id") @db.Uuid
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+  @@map("invite_tokens")
+}
+
+model Group {
+  id                 String      @id @default(uuid()) @db.Uuid
+  name               String
+  currency           String      @default("SAR")
+  defaultSplitMethod SplitMethod @default(equal) @map("default_split_method")
+  membersCanSubmit   Boolean     @default(true) @map("members_can_submit")
+  createdById        String      @map("created_by_id") @db.Uuid
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  creator        User                 @relation("GroupCreator", fields: [createdById], references: [id])
+  members        GroupMember[]
+  activities     Activity[]
+  payments       Payment[]
+  paymentMethods GroupPaymentMethod[]
+  auditLogs      GroupAuditLog[]
+  notifications  NotificationLog[]
+  expenses       Expense[]
+  inviteTokens   InviteToken[]
+  budgetEvents   GroupBudgetEvent[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId           String    @map("group_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  role              GroupRole @default(member)
+  isPayingUser      Boolean   @default(false) @map("is_paying_user")
+  defaultShare      Int       @default(1) @map("default_share")
+  defaultPercentage Decimal?  @map("default_percentage") @db.Decimal(10, 4)
+  defaultAmount     Int?      @map("default_amount")
+  invitedAt         DateTime  @default(now()) @map("invited_at")
+  firstEnteredAt    DateTime? @map("first_entered_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("group_members")
+}
+
+model Activity {
+  id          String         @id @default(uuid()) @db.Uuid
+  groupId     String         @map("group_id") @db.Uuid
+  title       String
+  description String?
+  startsAt    DateTime?      @map("starts_at")
+  endsAt      DateTime?      @map("ends_at")
+  status      ActivityStatus @default(open)
+  createdById String         @map("created_by_id") @db.Uuid
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  creator   User     @relation("ActivityCreator", fields: [createdById], references: [id])
+  expenses  Expense[]
+
+  @@index([groupId])
+  @@index([groupId, status])
+  @@map("activities")
+}
+
+model Expense {
+  id             String           @id @default(uuid()) @db.Uuid
+  activityId     String           @map("activity_id") @db.Uuid
+  groupId        String           @map("group_id") @db.Uuid
+  title          String
+  notes          String?
+  receiptUrl     String?          @map("receipt_url")
+  amount         Int
+  splitMethod    SplitMethod      @map("split_method")
+  approvalStatus ApprovalStatus   @default(approved) @map("approval_status")
+  budgetPaidAmount Int              @default(0) @map("budget_paid_amount")
+  isSealed       Boolean          @default(false) @map("is_sealed")
+  createdById    String           @map("created_by_id") @db.Uuid
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  activity    Activity            @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  group       Group               @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  creator     User                @relation("ExpenseCreator", fields: [createdById], references: [id])
+  shares      ExpenseShare[]
+  payers      ExpensePayer[]
+  allocations PaymentAllocation[]
+
+  @@index([groupId])
+  @@index([activityId])
+  @@index([groupId, approvalStatus])
+  @@map("expenses")
+}
+
+model ExpenseShare {
+  id             String @id @default(uuid()) @db.Uuid
+  expenseId      String @map("expense_id") @db.Uuid
+  userId         String @map("user_id") @db.Uuid
+  included       Boolean @default(true)
+  shareWeight    Int     @default(1) @map("share_weight")
+  percentage     Decimal? @db.Decimal(10, 4)
+  amountOverride Int?    @map("amount_override")
+  dueAmount      Int     @map("due_amount")
+  baselineAmount Int     @map("baseline_amount")
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+  @@map("expense_shares")
+}
+
+model ExpensePayer {
+  id        String  @id @default(uuid()) @db.Uuid
+  expenseId String  @map("expense_id") @db.Uuid
+  userId    String  @map("user_id") @db.Uuid
+  amount    Int
+  paymentId String? @map("payment_id") @db.Uuid
+
+  expense Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User     @relation(fields: [userId], references: [id])
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+  @@index([paymentId])
+  @@map("expense_payers")
+}
+
+model Payment {
+  id             String         @id @default(uuid()) @db.Uuid
+  groupId        String         @map("group_id") @db.Uuid
+  payerUserId    String         @map("payer_user_id") @db.Uuid
+  amount         Int
+  notes          String?
+  receiptUrl     String?        @map("receipt_url")
+  methodSnapshot String?        @map("method_snapshot")
+  paidAt         DateTime       @default(now()) @map("paid_at")
+  approvalStatus ApprovalStatus @default(approved) @map("approval_status")
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  group       Group               @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  payer       User                @relation(fields: [payerUserId], references: [id])
+  allocations PaymentAllocation[]
+  expensePayers ExpensePayer[]
+
+  @@index([groupId])
+  @@index([groupId, approvalStatus])
+  @@index([payerUserId])
+  @@map("payments")
+}
+
+model PaymentAllocation {
+  id        String @id @default(uuid()) @db.Uuid
+  paymentId String @map("payment_id") @db.Uuid
+  expenseId String @map("expense_id") @db.Uuid
+  amount    Int
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@index([expenseId])
+  @@index([paymentId])
+  @@map("payment_allocations")
+}
+
+model UserPaymentMethod {
+  id              String  @id @default(uuid()) @db.Uuid
+  userId          String  @map("user_id") @db.Uuid
+  type            String
+  label           String
+  iban            String?
+  beneficiaryName String? @map("beneficiary_name")
+  qrImageUrl      String? @map("qr_image_url")
+  linkUrl         String? @map("link_url")
+  details         String?
+  isDefault       Boolean @default(false) @map("is_default")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_payment_methods")
+}
+
+model GroupPaymentMethod {
+  id              String  @id @default(uuid()) @db.Uuid
+  groupId         String  @map("group_id") @db.Uuid
+  type            String
+  label           String
+  iban            String?
+  beneficiaryName String? @map("beneficiary_name")
+  qrImageUrl      String? @map("qr_image_url")
+  linkUrl         String? @map("link_url")
+  details         String?
+  sourceUserId    String? @map("source_user_id") @db.Uuid
+  isDefault       Boolean @default(false) @map("is_default")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+  @@map("group_payment_methods")
+}
+
+model GroupAuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  groupId    String   @map("group_id") @db.Uuid
+  actorUserId String? @map("actor_user_id") @db.Uuid
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([groupId, createdAt])
+  @@map("group_audit_logs")
+}
+
+model NotificationLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  groupId     String   @map("group_id") @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  channel     String
+  targetType  String   @map("target_type")
+  targetId    String?  @map("target_id")
+  recipient   String
+  body        String
+  sentAt      DateTime @default(now()) @map("sent_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([groupId, sentAt])
+  @@map("notification_logs")
+}
+
+model GroupBudgetEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  groupId     String   @map("group_id") @db.Uuid
+  amount      Int
+  kind        String
+  expenseId   String?  @map("expense_id") @db.Uuid
+  paymentId   String?  @map("payment_id") @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  note        String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+  @@map("group_budget_events")
+}
