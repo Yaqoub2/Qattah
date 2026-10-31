@@ -97,6 +97,24 @@ export function splitActivity(
  * A tagged payment to a member moves that amount from the payee to the payer.
  * Untagged payments are general credit and only show in the overall balance.
  */
+/**
+ * Dues to freeze when an activity closes. If the dues add up to more than the expenses, every due is
+ * scaled down by the same ratio so they sum exactly to the expenses. If they add up to less, they are kept
+ * and the unshared part stays uncovered.
+ */
+export function closingDues(split: ActivityDues): Record<string, number> {
+  const assigned = split.total - split.unassigned;
+  if (assigned <= split.total) return { ...split.dues };
+  return distributeExact(
+    split.total,
+    Object.entries(split.dues).map(([userId, due]) => ({ userId, weight: due })),
+  );
+}
+
+/** Closing is allowed once this activity's tagged payments (to the group or to a member) cover its expenses. */
+export const paymentsCover = (total: number, payments: { amount: number }[]) =>
+  payments.reduce((sum, p) => sum + p.amount, 0) >= total;
+
 export type ActivityRow = { userId: string; due: number; paid: number; left: number };
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activityPaid, activityParticipants, activitySummary, distributeExact, groupLedger, splitActivity } from "./ledger";
+import { activityPaid, activityParticipants, activitySummary, closingDues, paymentsCover, distributeExact, groupLedger, splitActivity } from "./ledger";
 
 const day = (s: string) => new Date(`${s}T00:00:00Z`);
 const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
@@ -148,5 +148,23 @@ describe("closed activity", () => {
     const entries = [{ activityId: "x", userId: "a", rule: { method: "amount" as const, value: 300 } }];
     expect(activityParticipants(activity, members, entries)).toEqual([{ userId: "a", rule: { method: "amount", value: 300 } }]);
     expect(activityParticipants({ ...activity, closed: false }, members, entries).map((p) => p.userId)).toEqual(["a", "b"]);
+  });
+});
+
+describe("closingDues", () => {
+  it("scales dues above the expenses down to exactly the expenses", () => {
+    const dues = { a: 35000, b: 35000, c: 35000, d: 35000, e: 35000, f: 35000, g: 35000, h: 15000 };
+    const r = closingDues({ total: 220800, dues, unset: [], unassigned: 220800 - 260000 });
+    expect(sum(r)).toBe(220800);
+    expect(r.a).toBe(29723);
+    expect(r.h).toBe(12739);
+  });
+  it("keeps dues that add up to the expenses or less", () => {
+    const split = { total: 300, dues: { a: 100, b: 100 }, unset: [], unassigned: 100 };
+    expect(closingDues(split)).toEqual({ a: 100, b: 100 });
+  });
+  it("allows closing once tagged payments cover the expenses", () => {
+    expect(paymentsCover(220800, [{ amount: 200000 }, { amount: 75000 }])).toBe(true);
+    expect(paymentsCover(220800, [{ amount: 200000 }])).toBe(false);
   });
 });

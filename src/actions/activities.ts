@@ -9,7 +9,7 @@ import { Prisma } from "@prisma/client";
 import { f, formAction, toMinorOrThrow, toSplitColumns, withUpload } from "@/server/action";
 import { approvalFor } from "@/server/approval";
 import { removeFiles } from "@/server/storage";
-import { activityParticipants, splitActivity } from "@/lib/ledger";
+import { activityParticipants, closingDues, paymentsCover, splitActivity } from "@/lib/ledger";
 import { ledgerMembers, listEntries, loadActivity, loadGroup } from "@/server/queries";
 
 /** One INSERT into activities. */
@@ -126,7 +126,8 @@ export const sealExpense = formAction(z.object({ groupId: f.id, expenseId: f.id 
 
 /**
  * Close: freezes every participant's due as a fixed amount in activity_members, then sets closed_at,
- * in one transaction. Refused while expenses are pending or the split is incomplete.
+ * in one transaction. Dues above the expenses are scaled down to match them (closingDues).
+ * Refused while expenses are pending, a participant has no due, or tagged payments don't cover the expenses.
  * Queries: group with members, the activity, its activity_members; then the upserts and one conditional UPDATE.
  */
 export const closeActivity = formAction(z.object({ groupId: f.id, activityId: f.id }), async ({ groupId, activityId }) => {
@@ -141,10 +142,11 @@ export const closeActivity = formAction(z.object({ groupId: f.id, activityId: f.
   if (activity.expenses.some((e) => !e.approvedAt)) throw new ActionError("has_pending");
   const total = activity.expenses.reduce((sum, e) => sum + e.amount, 0);
   const split = splitActivity(total, activityParticipants({ ...activity, total }, ledgerMembers(group), entries));
-  if (split.unset.length > 0 || split.unassigned !== 0) throw new ActionError("split_incomplete");
+  if (split.unset.length > 0) throw new ActionError("split_incomplete");
+  if (!paymentsCover(total, activity.payments.filter((p) => p.approvedAt))) throw new ActionError("payments_short");
 
   await prisma.$transaction([
-    ...Object.entries(split.dues).map(([userId, due]) => {
+    ...Object.entries(closingDues(split)).map(([userId, due]) => {
       const frozen = { splitMethod: "amount" as const, splitValue: new Prisma.Decimal(due) };
       return prisma.activityMember.upsert({
         where: { activityId_userId: { activityId, userId } },

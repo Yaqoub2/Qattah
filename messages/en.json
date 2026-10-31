@@ -85,7 +85,7 @@
     "closedHint": "This activity is closed: dues are frozen and expenses can't be added or changed. Payments can still be recorded.",
     "close": "Close activity",
     "reopen": "Reopen activity",
-    "confirmClose": "Close this activity? Each participant's current due is frozen."
+    "confirmClose": "Close this activity? If the dues add up to more than the expenses, each due is reduced by the same ratio to match them, and the difference becomes credit. Dues are then frozen."
   },
   "expense": {
     "title": "Expenses",
@@ -172,7 +172,8 @@
     "activity_closed": "This activity is closed. Reopen it first.",
     "expense_sealed": "This expense has a fixed amount and can't be changed.",
     "has_pending": "Approve or reject the pending expenses first.",
-    "split_incomplete": "Every participant needs a due and the whole total must be shared before closing."
+    "split_incomplete": "Every participant needs a due before closing.",
+    "payments_short": "Payments tagged to this activity don't cover its expenses yet."
   },
   "reminder": {
     "send": "Remind",
