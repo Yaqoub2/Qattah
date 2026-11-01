@@ -4,14 +4,19 @@ import { updateProfile } from "@/actions/profile";
 import { ActionForm, Field, SubmitButton } from "@/components/forms";
 import { MethodCard, MethodForm } from "@/components/methods";
 import { Fold, Page, Section } from "@/components/page";
+import { prisma } from "@/server/db";
 import { pageUser } from "@/server/guard";
 import { toMethodCards } from "@/server/methods-view";
 import { listMyMethods } from "@/server/queries";
 import { signedUrls } from "@/server/storage";
 
 export default async function ProfilePage() {
-  const [user, t, locale] = await Promise.all([pageUser(), getTranslations(), getLocale()]);
-  const methods = await listMyMethods(user.id);
+  const [session, t, locale] = await Promise.all([pageUser(), getTranslations(), getLocale()]);
+  const user = (await prisma.user.findUnique({
+    where: { id: session.id },
+    select: { name: true, email: true, phone: true, locale: true },
+  })) ?? session;
+  const methods = await listMyMethods(session.id);
   const cards = toMethodCards(methods, await signedUrls(methods.map((m) => m.qrPath)));
   const signOut = logout.bind(null, locale);
 

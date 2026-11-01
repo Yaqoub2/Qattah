@@ -134,13 +134,13 @@ const paymentSelect = {
   receiptPath: true,
   createdById: true,
   approvedAt: true,
-  activity: { select: { title: true } },
+  activity: { select: { id: true, title: true } },
 } as const;
 
-/** Payments for the group, newest first (all of them when `take` is omitted). Uses payments(group_id, paid_on). */
-export function listPayments(groupId: string, take?: number) {
+/** Payments for the group, newest first (all of them when `take` is omitted). Uses payments(group_id, paid_on), or payments(activity_id) when scoped. */
+export function listPayments(groupId: string, take?: number, activityId?: string) {
   return prisma.payment.findMany({
-    where: { groupId },
+    where: { groupId, ...(activityId ? { activityId } : {}) },
     select: paymentSelect,
     orderBy: [{ paidOn: "desc" }, { createdAt: "desc" }],
     take,

@@ -1,5 +1,6 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { z } from "zod";
 import { redirect } from "next/navigation";
 import { prisma } from "@/server/db";
@@ -14,6 +15,8 @@ export const updateProfile = formAction(
     const user = await actionUser();
     await prisma.user.update({ where: { id: user.id }, data: { name, locale } });
     await refreshSessionUser({ name, locale });
+    // next-intl keeps NEXT_LOCALE and would send /ar back to the previous language.
+    (await cookies()).set("NEXT_LOCALE", locale, { path: "/", sameSite: "lax", maxAge: 60 * 60 * 24 * 365 });
     redirect(`/${locale}/profile`);
   },
 );

@@ -35,14 +35,58 @@ export default async function GroupOverview({ params }: { params: Promise<{ grou
   return (
     <GroupPage group={group}>
       <div className="grid grid-cols-3 gap-2">
-        <Stat label={t("ledger.paid")} value={money(mine.paid)} />
-        <Stat label={t("ledger.due")} value={money(mine.due)} />
+        <Stat label={t("ledger.youPaid")} value={money(mine.paid)} />
+        <Stat label={t("ledger.youDue")} value={money(mine.due)} />
         <Stat
-          label={mine.balance >= 0 ? t("ledger.credit") : t("ledger.owes")}
+          label={mine.balance >= 0 ? t("ledger.youCredit") : t("ledger.youOwe")}
           value={money(Math.abs(mine.balance))}
           tone={mine.balance >= 0 ? "text-teal" : "text-rose"}
         />
       </div>
+
+      <Section title={t("activity.title")}>
+        {admin && (
+          <Fold label={t("activity.new")}>
+            <ActionForm action={createActivity}>
+              <Hidden values={{ groupId }} />
+              <Field label={t("activity.name")} name="title" required maxLength={80} />
+              <Field label={t("activity.startsOn")} name="startsOn" type="date" defaultValue={isoDay(new Date())} />
+              <SubmitButton>{t("activity.create")}</SubmitButton>
+            </ActionForm>
+          </Fold>
+        )}
+        {activities.length === 0 ? (
+          <Empty>{t("activity.empty")}</Empty>
+        ) : (
+          <ul className="space-y-2">
+            {[...activities.filter((a) => !a.closed), ...activities.filter((a) => a.closed)].map((a) => {
+              const split = ledger.byActivity[a.id];
+              const warn = split.unset.length > 0 || split.unassigned !== 0;
+              return (
+                <li key={a.id}>
+                  <Link
+                    href={`/groups/${groupId}/activities/${a.id}`}
+                    className={`block rounded-2xl border p-4 ${a.closed ? "border-teal/25 bg-teal/10" : "card"}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold">{a.title}</span>
+                      <span className="text-sm">{money(a.total)}</span>
+                    </div>
+                    {a.closed && <div className="mt-1 text-base font-bold text-teal-deep">{t("activity.closed")}</div>}
+                    <div className="mt-1 flex justify-between text-xs text-ink/50">
+                      <span>{formatDay(a.startsOn, locale)}</span>
+                      <span>
+                        {t("ledger.yourDue")} {money(split.dues[group.me.userId] ?? 0)}
+                      </span>
+                    </div>
+                    {warn && <div className="mt-2 text-xs text-amber">{t("activity.needsAttention")}</div>}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Section>
 
       {admin && (
         <PendingQueue
@@ -55,7 +99,14 @@ export default async function GroupOverview({ params }: { params: Promise<{ grou
         />
       )}
 
-      <Section title={t("ledger.members")} action={<span className="text-xs text-ink/50">{t("ledger.cash")}: {money(ledger.cash)}</span>}>
+      <Section
+        title={t("ledger.members")}
+        action={
+          <span className={`text-base font-bold ${ledger.cash >= 0 ? "text-teal" : "text-rose"}`}>
+            {t("ledger.cash")}: {money(ledger.cash)}
+          </span>
+        }
+      >
         <ul className="card divide-y divide-line">
           {group.members.map((m) => {
             const b = ledger.byUser[m.userId];
@@ -88,49 +139,6 @@ export default async function GroupOverview({ params }: { params: Promise<{ grou
         </ul>
       </Section>
 
-      <Section title={t("activity.title")}>
-        {activities.length === 0 ? (
-          <Empty>{t("activity.empty")}</Empty>
-        ) : (
-          <ul className="space-y-2">
-            {activities.map((a) => {
-              const split = ledger.byActivity[a.id];
-              const warn = split.unset.length > 0 || split.unassigned !== 0;
-              return (
-                <li key={a.id}>
-                  <Link href={`/groups/${groupId}/activities/${a.id}`} className="card block p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold">{a.title}</span>
-                      <span className="text-sm">{money(a.total)}</span>
-                    </div>
-                    <div className="mt-1 flex justify-between text-xs text-ink/50">
-                      <span>
-                        {formatDay(a.startsOn, locale)}
-                        {a.closed && ` · ${t("activity.closed")}`}
-                      </span>
-                      <span>
-                        {t("ledger.yourDue")} {money(split.dues[group.me.userId] ?? 0)}
-                      </span>
-                    </div>
-                    {warn && <div className="mt-2 text-xs text-amber">{t("activity.needsAttention")}</div>}
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Section>
-
-      {admin && (
-        <Fold label={t("activity.new")}>
-          <ActionForm action={createActivity}>
-            <Hidden values={{ groupId }} />
-            <Field label={t("activity.name")} name="title" required maxLength={80} />
-            <Field label={t("activity.startsOn")} name="startsOn" type="date" defaultValue={isoDay(new Date())} />
-            <SubmitButton>{t("activity.create")}</SubmitButton>
-          </ActionForm>
-        </Fold>
-      )}
     </GroupPage>
   );
 }

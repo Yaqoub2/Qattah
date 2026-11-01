@@ -44,13 +44,18 @@
     "edit": "Edit",
     "confirmDelete": "Delete this?",
     "confirmYes": "Yes, continue",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "saved": "Saved"
   },
   "ledger": {
     "paid": "Paid",
     "due": "Due",
     "credit": "Credit",
     "owes": "Owes",
+    "youPaid": "You paid",
+    "youDue": "You owe",
+    "youCredit": "Your balance",
+    "youOwe": "You owe",
     "members": "Balances",
     "cash": "Group cash",
     "yourDue": "Your due"
@@ -66,7 +71,7 @@
     "unset": "Set a due for: {names}",
     "unassigned": "{amount} of this activity's expenses isn't in anyone's share yet. Give a member a percentage or shares, list more members, or set a due.",
     "overAssigned": "Dues exceed expenses by {amount}",
-    "participants": "Who owes",
+    "participants": "Each member's share",
     "listed": "Listed",
     "auto": "Paying member",
     "notIncluded": "Not included",
@@ -112,7 +117,9 @@
     "noActivity": "None",
     "paidOn": "Date",
     "note": "Note (optional)",
-    "confirmDelete": "Delete this payment? Balances will change."
+    "confirmDelete": "Delete this payment? Balances will change.",
+    "recorded": "already recorded",
+    "showingActivity": "Showing payments for this activity"
   },
   "split": {
     "method": "Due by",
@@ -220,6 +227,15 @@
     "export": "Export (CSV)",
     "exportSummary": "Balances",
     "exportTransactions": "All transactions",
+    "exportPdf": "PDF statement",
+    "pdfTitle": "Account statement",
+    "contributions": "Contributions",
+    "expenses": "Expenses",
+    "totalIn": "Total collected",
+    "totalOut": "Total expenses",
+    "surplus": "This activity's surplus",
+    "deficit": "This activity's shortfall",
+    "pdfHint": "Contributions and expenses for this activity",
     "date": "Date",
     "type": "Type",
     "description": "Description",

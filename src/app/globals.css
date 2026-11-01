@@ -96,6 +96,15 @@ body {
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
 }
 
+@keyframes load {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
 .bottom-nav {
   position: sticky;
   bottom: 0;
