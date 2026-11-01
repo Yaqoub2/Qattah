@@ -13,7 +13,7 @@ type Row = {
   paidOn: Date;
   note: string | null;
   approvedAt: Date | null;
-  activity: { title: string } | null;
+  activity: { id: string; title: string } | null;
 };
 
 export async function PaymentRow({

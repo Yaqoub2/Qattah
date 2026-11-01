@@ -2,6 +2,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { getMessages, setRequestLocale } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { IBM_Plex_Sans, IBM_Plex_Sans_Arabic } from "next/font/google";
+import { NavProgress } from "@/components/nav-progress";
 import { routing } from "@/i18n/routing";
 import "../globals.css";
 
@@ -36,6 +37,7 @@ export default async function LocaleLayout({
     <html lang={locale} dir={locale === "ar" ? "rtl" : "ltr"} className={`${plex.variable} ${plexAr.variable}`}>
       <body className="antialiased">
         <NextIntlClientProvider locale={locale} messages={messages}>
+          <NavProgress />
           {children}
         </NextIntlClientProvider>
       </body>

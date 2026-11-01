@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useRef, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useTranslations } from "next-intl";
 
@@ -37,7 +37,15 @@ export function ActionForm({
   const form = useRef<HTMLFormElement>(null);
   const confirmed = useRef(false);
   const [asking, setAsking] = useState(false);
+  const [toast, setToast] = useState(false);
+  useEffect(() => {
+    if (!state.saved) return;
+    setToast(true);
+    const id = setTimeout(() => setToast(false), 2400);
+    return () => clearTimeout(id);
+  }, [state.saved]);
   return (
+    <>
     <form
       key={state.saved}
       ref={form}
@@ -81,6 +89,12 @@ export function ActionForm({
         </p>
       )}
     </form>
+    {toast && (
+      <p role="status" className="fixed inset-x-4 bottom-20 z-50 mx-auto max-w-lg rounded-xl bg-teal px-4 py-3 text-center text-sm font-semibold text-white shadow-lg">
+        {tc("saved")}
+      </p>
+    )}
+    </>
   );
 }
 
@@ -88,6 +102,7 @@ export function SubmitButton({ children, className = "btn btn-primary w-full" }:
   const { pending } = useFormStatus();
   return (
     <button className={className} type="submit" disabled={pending} aria-busy={pending}>
+      {pending && <span className="h-4 w-4 animate-spin rounded-full border-2 border-current/30 border-t-current" />}
       {children}
     </button>
   );

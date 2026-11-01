@@ -26,7 +26,7 @@ export default async function ReportsPage({ params }: { params: Promise<{ groupI
       <div className="grid grid-cols-3 gap-2 text-center">
         <Total label={t("report.spent")} value={money(spent)} />
         <Total label={t("report.paidIn")} value={money(paidIn)} />
-        <Total label={t("ledger.cash")} value={money(ledger.cash)} />
+        <Total label={t("ledger.cash")} value={money(ledger.cash)} tone={ledger.cash >= 0 ? "text-teal" : "text-rose"} />
       </div>
 
       <Section title={t("ledger.members")}>
@@ -105,11 +105,11 @@ export default async function ReportsPage({ params }: { params: Promise<{ groupI
   );
 }
 
-function Total({ label, value }: { label: string; value: string }) {
+function Total({ label, value, tone = "" }: { label: string; value: string; tone?: string }) {
   return (
     <div className="card p-3">
       <div className="text-[11px] text-ink/50">{label}</div>
-      <div className="mt-1 text-sm font-bold">{value}</div>
+      <div className={`mt-1 text-sm font-bold ${tone}`}>{value}</div>
     </div>
   );
 }

@@ -21,12 +21,13 @@ export default async function PaymentsPage({
   const [{ groupId }, { activityId }] = await Promise.all([params, searchParams]);
   const [{ user, group, admin }, payments, activities, methods, t, locale] = await Promise.all([
     pageGroup(groupId),
-    listPayments(groupId, 100),
+    listPayments(groupId, activityId ? undefined : 100, activityId),
     activityOptions(groupId),
     listGroupMethods(groupId),
     getTranslations(),
     getLocale(),
   ]);
+  const recordedPayers = new Set(payments.map((p) => p.payerId));
   const urls = await signedUrls([...payments.map((p) => p.receiptPath), ...methods.map((m) => m.qrPath)]);
   const names = new Map(group.members.map((m) => [m.userId, m.name]));
   const groupMethods = toMethodCards(methods.filter((m) => !m.userId), urls);
@@ -76,11 +77,15 @@ export default async function PaymentsPage({
               {group.members.map((m) => (
                 <option key={m.userId} value={m.userId}>
                   {m.name}
+                  {activityId && recordedPayers.has(m.userId) ? ` · ${t("payment.recorded")}` : ""}
                 </option>
               ))}
             </Select>
           ) : (
             <Hidden values={{ payerId: user.id }} />
+          )}
+          {activityId && !admin && recordedPayers.has(user.id) && (
+            <p className="text-xs text-teal">{t("payment.recorded")}</p>
           )}
           <Select label={t("payment.payee")} name="payeeId" defaultValue="">
             <option value="">{t("payment.toGroup")}</option>
@@ -108,7 +113,7 @@ export default async function PaymentsPage({
         </ActionForm>
       </Fold>
 
-      <Section title={t("nav.payments")}>
+      <Section title={activityId ? t("payment.showingActivity") : t("nav.payments")}>
         {payments.length === 0 ? (
           <Empty>{t("payment.empty")}</Empty>
         ) : (

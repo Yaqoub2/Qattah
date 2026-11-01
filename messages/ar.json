@@ -44,15 +44,20 @@
     "edit": "تعديل",
     "confirmDelete": "حذف هذا؟",
     "confirmYes": "نعم، تابع",
-    "cancel": "إلغاء"
+    "cancel": "إلغاء",
+    "saved": "تم الحفظ"
   },
   "ledger": {
     "paid": "دفع",
     "due": "المستحق",
     "credit": "رصيد له",
     "owes": "عليه",
+    "youPaid": "دفعت",
+    "youDue": "مستحقك",
+    "youCredit": "رصيدك",
+    "youOwe": "عليك",
     "members": "الأرصدة",
-    "cash": "نقد المجموعة",
+    "cash": "ميزانية المجموعة",
     "yourDue": "مستحقك"
   },
   "activity": {
@@ -66,7 +71,7 @@
     "unset": "حدّد المستحق لـ: {names}",
     "unassigned": "{amount} من مصاريف هذا النشاط غير موزّع على أي عضو بعد. حدّد نسبة أو حصصًا لعضو، أو أضف أعضاء، أو حدّد مستحقًا.",
     "overAssigned": "المستحقات تتجاوز المصاريف بـ {amount}",
-    "participants": "من عليه",
+    "participants": "الحصة المقررة لكل عضو",
     "listed": "مُدرج",
     "auto": "عضو دافع",
     "notIncluded": "غير مشمول",
@@ -112,7 +117,9 @@
     "noActivity": "بدون",
     "paidOn": "التاريخ",
     "note": "ملاحظة (اختياري)",
-    "confirmDelete": "حذف هذه الدفعة؟ ستتغير الأرصدة."
+    "confirmDelete": "حذف هذه الدفعة؟ ستتغير الأرصدة.",
+    "recorded": "مسجّلة",
+    "showingActivity": "دفعات هذا النشاط فقط"
   },
   "split": {
     "method": "المستحق حسب",
@@ -220,6 +227,15 @@
     "export": "تصدير (CSV)",
     "exportSummary": "الأرصدة",
     "exportTransactions": "كل العمليات",
+    "exportPdf": "كشف PDF",
+    "pdfTitle": "تقرير حساب",
+    "contributions": "المساهمات",
+    "expenses": "المصاريف",
+    "totalIn": "إجمالي المحصل",
+    "totalOut": "إجمالي المصاريف",
+    "surplus": "فائض هذا النشاط",
+    "deficit": "عجز هذا النشاط",
+    "pdfHint": "المساهمات والمصاريف من القطة",
     "date": "التاريخ",
     "type": "النوع",
     "description": "الوصف",

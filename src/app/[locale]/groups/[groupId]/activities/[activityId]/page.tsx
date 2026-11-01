@@ -218,7 +218,7 @@ export default async function ActivityPage({ params }: { params: Promise<{ group
       <Section
         title={t("payment.forActivity")}
         action={
-          <Link href={`/groups/${groupId}/payments?activityId=${activityId}`} className="text-sm text-teal">
+          <Link href={`/groups/${groupId}/payments?activityId=${activityId}`} className="btn btn-primary px-3 py-1.5 text-xs">
             {t("payment.add")}
           </Link>
         }
@@ -317,6 +317,9 @@ export default async function ActivityPage({ params }: { params: Promise<{ group
           </div>
         )}
         <div className="grid grid-cols-2 gap-2">
+          <Link className="btn btn-primary col-span-2 text-sm" href={`/groups/${groupId}/activities/${activityId}/statement`}>
+            {t("report.exportPdf")}
+          </Link>
           <a className="btn btn-ghost text-sm" href={exportUrl("summary")}>
             {t("report.exportSummary")}
           </a>
