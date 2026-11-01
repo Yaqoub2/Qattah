@@ -6,7 +6,9 @@ import {
   closeActivity,
   deleteActivity,
   deleteExpense,
+  fillFromBudget,
   removeActivityMember,
+  removeFills,
   reopenActivity,
   sealExpense,
   setActivityMember,
@@ -17,18 +19,19 @@ import { Empty, Fold, GroupPage, Section } from "@/components/page";
 import { PaymentRow } from "@/components/payment-row";
 import { ReceiptInput, ReceiptLink } from "@/components/receipt";
 import { formatDay, ruleInput, ruleText } from "@/lib/format";
-import { activityPaid, activityParticipants, activitySummary, splitActivity } from "@/lib/ledger";
+import { activityPaid, activityParticipants, activitySummary, effectiveFills, splitActivity } from "@/lib/ledger";
 import { formatMoney, fromMinor } from "@/lib/money";
 import { pageGroup } from "@/server/guard";
-import { ledgerMembers, listEntries, loadActivity } from "@/server/queries";
+import { ledgerMembers, listEntries, listFills, loadActivity } from "@/server/queries";
 import { signedUrls, storageEnabled } from "@/server/storage";
 
 export default async function ActivityPage({ params }: { params: Promise<{ groupId: string; activityId: string }> }) {
   const { groupId, activityId } = await params;
-  const [{ user, group, admin }, activity, entries, t, locale] = await Promise.all([
+  const [{ user, group, admin }, activity, entries, fillRows, t, locale] = await Promise.all([
     pageGroup(groupId),
     loadActivity(groupId, activityId),
     listEntries(groupId, activityId),
+    listFills(groupId, activityId),
     getTranslations(),
     getLocale(),
   ]);
@@ -43,7 +46,10 @@ export default async function ActivityPage({ params }: { params: Promise<{ group
   const listed = new Map(entries.map((e) => [e.userId, e]));
   const inActivity = new Set(participants.map((p) => p.userId));
   const covered = activityPaid(activity.payments.filter((p) => p.approvedAt));
-  const report = activitySummary(split, covered);
+  const fills = effectiveFills(fillRows)[activityId] ?? {};
+  const report = activitySummary(split, covered, fills);
+  const tagged = activity.payments.reduce((s, p) => s + (p.approvedAt ? p.amount : 0), 0);
+  const shortfall = total - tagged - report.filled;
   const exportUrl = (kind: string) => `/api/groups/${groupId}/export?kind=${kind}&activityId=${activityId}&locale=${locale}`;
   const money = (v: number) => formatMoney(v, group.currency, locale);
   const ruleT = (key: "sharesN" | "percentN", v: { n: string }) => t(`split.${key}`, v);
@@ -259,7 +265,12 @@ export default async function ActivityPage({ params }: { params: Promise<{ group
                   <tr key={r.userId}>
                     <td className="px-3 py-2">{names.get(r.userId)}</td>
                     <td className="px-3 py-2 text-end">{money(r.due)}</td>
-                    <td className="px-3 py-2 text-end">{money(r.paid)}</td>
+                    <td className="px-3 py-2 text-end">
+                      {money(r.paid)}
+                      {r.fromSurplus > 0 && (
+                        <div className="text-[11px] text-ink/50">{t("fill.inclSurplus", { amount: money(r.fromSurplus) })}</div>
+                      )}
+                    </td>
                     <td className={`px-3 py-2 text-end font-semibold ${r.left > 0 ? "text-rose" : "text-teal"}`}>{money(r.left)}</td>
                   </tr>
                 ))}
@@ -268,6 +279,43 @@ export default async function ActivityPage({ params }: { params: Promise<{ group
           </div>
         )}
         {report.extra > 0 && <p className="text-xs text-ink/50">{t("report.extraNote", { amount: money(report.extra) })}</p>}
+        {(report.filled > 0 || (admin && open && shortfall > 0)) && (
+          <div className="card space-y-2 p-4 text-sm">
+            <div className="flex justify-between font-medium">
+              <span>{t("fill.title")}</span>
+              {shortfall > 0 && <span className="text-rose">{t("fill.short", { amount: money(shortfall) })}</span>}
+            </div>
+            {report.filled > 0 && (
+              <ul className="space-y-1 text-xs">
+                {Object.entries(fills)
+                  .filter(([, v]) => v > 0)
+                  .map(([userId, v]) => (
+                    <li key={userId} className="flex justify-between">
+                      <span>{t("fill.fromSurplusOf", { name: names.get(userId) ?? "" })}</span>
+                      <span>{money(v)}</span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {admin && open && (
+              <div className="grid grid-cols-2 gap-2">
+                {shortfall > 0 && (
+                  <ActionForm action={fillFromBudget} className="" confirm={t("fill.confirm", { amount: money(shortfall) })}>
+                    <Hidden values={ids} />
+                    <SubmitButton className="btn btn-primary w-full text-sm">{t("fill.action")}</SubmitButton>
+                  </ActionForm>
+                )}
+                {report.filled > 0 && (
+                  <ActionForm action={removeFills} className="" confirm={t("fill.confirmRemove")}>
+                    <Hidden values={ids} />
+                    <SubmitButton className="btn btn-ghost w-full text-sm text-rose">{t("fill.remove")}</SubmitButton>
+                  </ActionForm>
+                )}
+              </div>
+            )}
+            <p className="text-[11px] text-ink/50">{t("fill.hint")}</p>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-2">
           <a className="btn btn-ghost text-sm" href={exportUrl("summary")}>
             {t("report.exportSummary")}

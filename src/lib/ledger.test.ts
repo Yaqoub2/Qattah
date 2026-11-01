@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activityPaid, activityParticipants, activitySummary, closingDues, paymentsCover, distributeExact, groupLedger, splitActivity } from "./ledger";
+import { activityPaid, activityParticipants, activitySummary, availableSurplus, closingDues, effectiveFills, paymentsCover, planFill, distributeExact, groupLedger, splitActivity } from "./ledger";
 
 const day = (s: string) => new Date(`${s}T00:00:00Z`);
 const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
@@ -130,9 +130,9 @@ describe("activitySummary", () => {
     ]);
     const r = activitySummary(split, covered);
     expect(r.rows).toEqual([
-      { userId: "a", due: 100, paid: 150, left: -50 },
-      { userId: "b", due: 200, paid: 0, left: 200 },
-      { userId: "c", due: 0, paid: 20, left: -20 },
+      { userId: "a", due: 100, paid: 150, fromSurplus: 0, left: -50 },
+      { userId: "b", due: 200, paid: 0, fromSurplus: 0, left: 200 },
+      { userId: "c", due: 0, paid: 20, fromSurplus: 0, left: -20 },
     ]);
     expect([r.outstanding, r.extra, r.collected]).toEqual([200, 70, 170]);
   });
@@ -166,5 +166,47 @@ describe("closingDues", () => {
   it("allows closing once tagged payments cover the expenses", () => {
     expect(paymentsCover(220800, [{ amount: 200000 }, { amount: 75000 }])).toBe(true);
     expect(paymentsCover(220800, [{ amount: 200000 }])).toBe(false);
+  });
+});
+
+describe("fill from group budget", () => {
+  const balances = {
+    ali: { due: 0, paid: 300, balance: 300 },
+    sara: { due: 0, paid: 100, balance: 100 },
+    omar: { due: 500, paid: 0, balance: -500 },
+  };
+
+  it("splits the shortfall by available surplus (the 1,000 trip short by 200)", () => {
+    const plan = planFill(200, availableSurplus(balances, {}));
+    expect(plan).toEqual({ ali: 150, sara: 50 });
+  });
+
+  it("does not reuse surplus already covering another activity", () => {
+    const effective = effectiveFills([
+      { activityId: "trip", userId: "ali", amount: 150, total: 1000, tagged: 800 },
+      { activityId: "trip", userId: "sara", amount: 50, total: 1000, tagged: 800 },
+    ]);
+    expect(availableSurplus(balances, effective)).toEqual({ ali: 150, sara: 50 });
+  });
+
+  it("fills partially when the surplus is smaller than the shortfall", () => {
+    expect(planFill(1000, { ali: 300, sara: 100 })).toEqual({ ali: 300, sara: 100 });
+  });
+
+  it("shrinks fills when tagged payments arrive later, freeing surplus", () => {
+    const effective = effectiveFills([
+      { activityId: "trip", userId: "ali", amount: 150, total: 1000, tagged: 900 },
+      { activityId: "trip", userId: "sara", amount: 50, total: 1000, tagged: 900 },
+    ]);
+    expect(effective.trip).toEqual({ ali: 75, sara: 25 });
+    expect(availableSurplus(balances, effective)).toEqual({ ali: 225, sara: 75 });
+  });
+
+  it("counts a fill as the filler's contribution to the activity", () => {
+    const split = { total: 1000, dues: { omar: 1000 }, unset: [], unassigned: 0 };
+    const r = activitySummary(split, activityPaid([{ payerId: "omar", payeeId: null, amount: 800 }]), { ali: 150, sara: 50 });
+    expect(r.rows.find((x) => x.userId === "ali")).toEqual({ userId: "ali", due: 0, paid: 150, fromSurplus: 150, left: -150 });
+    expect(r.filled).toBe(200);
+    expect(paymentsCover(1000, [{ amount: 800 }], r.filled)).toBe(true);
   });
 });
