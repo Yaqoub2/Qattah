@@ -2,9 +2,9 @@ import { getTranslations } from "next-intl/server";
 import { toCsv } from "@/lib/csv";
 import { isoDay } from "@/lib/format";
 import { fromMinor } from "@/lib/money";
-import { activityPaid, activityParticipants, activitySummary, splitActivity } from "@/lib/ledger";
+import { activityPaid, activityParticipants, activitySummary, effectiveFills, splitActivity } from "@/lib/ledger";
 import { computeGroupLedger } from "@/server/group-ledger";
-import { ledgerMembers, listEntries, listExpenses, listPayments, loadActivity, loadGroup } from "@/server/queries";
+import { ledgerMembers, listEntries, listExpenses, listFills, listPayments, loadActivity, loadGroup } from "@/server/queries";
 import { getSessionUser } from "@/server/session";
 
 /**
@@ -32,18 +32,30 @@ export async function GET(req: Request, { params }: { params: Promise<{ groupId:
 
   const activityId = url.searchParams.get("activityId");
   if (activityId) {
-    const [activity, entries] = await Promise.all([loadActivity(groupId, activityId), listEntries(groupId, activityId)]);
+    const [activity, entries, fillRows] = await Promise.all([
+      loadActivity(groupId, activityId),
+      listEntries(groupId, activityId),
+      listFills(groupId, activityId),
+    ]);
     if (!activity) return new Response("not found", { status: 404 });
     scope = `${activity.title}-${kind}`;
     const expenses = activity.expenses.filter((e) => e.approvedAt);
     const payments = activity.payments.filter((p) => p.approvedAt);
+    const fills = effectiveFills(fillRows)[activityId] ?? {};
     if (kind === "summary") {
       const total = expenses.reduce((sum, e) => sum + e.amount, 0);
       const split = splitActivity(total, activityParticipants({ ...activity, total }, ledgerMembers(group), entries));
-      const report = activitySummary(split, activityPaid(payments));
+      const report = activitySummary(split, activityPaid(payments), fills);
       rows = [
-        [t("report.member"), t("ledger.due"), t("ledger.paid"), t("activity.left"), group.currency],
-        ...report.rows.map((row) => [names.get(row.userId) ?? null, major(row.due), major(row.paid), major(row.left), null]),
+        [t("report.member"), t("ledger.due"), t("ledger.paid"), t("fill.fromSurplusColumn"), t("activity.left"), group.currency],
+        ...report.rows.map((row) => [
+          names.get(row.userId) ?? null,
+          major(row.due),
+          major(row.paid),
+          major(row.fromSurplus),
+          major(row.left),
+          null,
+        ]),
       ];
     } else {
       rows = [
@@ -57,6 +69,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ groupId:
           p.payeeId ? (names.get(p.payeeId) ?? null) : t("payment.toGroup"),
           major(p.amount),
         ]),
+        ...Object.entries(fills)
+          .filter(([, v]) => v > 0)
+          .map(([userId, v]) => [null, t("fill.title"), t("fill.fromSurplusOf", { name: names.get(userId) ?? "" }), names.get(userId) ?? null, t("payment.toGroup"), major(v)]),
       ];
     }
   } else if (kind === "summary") {

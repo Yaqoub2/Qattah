@@ -93,11 +93,6 @@ export function splitActivity(
 }
 
 /**
- * Who paid for one activity: only approved payments tagged with it count.
- * A tagged payment to a member moves that amount from the payee to the payer.
- * Untagged payments are general credit and only show in the overall balance.
- */
-/**
  * Dues to freeze when an activity closes. If the dues add up to more than the expenses, every due is
  * scaled down by the same ratio so they sum exactly to the expenses. If they add up to less, they are kept
  * and the unshared part stays uncovered.
@@ -111,28 +106,91 @@ export function closingDues(split: ActivityDues): Record<string, number> {
   );
 }
 
-/** Closing is allowed once this activity's tagged payments (to the group or to a member) cover its expenses. */
-export const paymentsCover = (total: number, payments: { amount: number }[]) =>
-  payments.reduce((sum, p) => sum + p.amount, 0) >= total;
+/** Closing is allowed once this activity's tagged payments (to the group or to a member) plus its fills cover its expenses. */
+export const paymentsCover = (total: number, payments: { amount: number }[], filled = 0) =>
+  payments.reduce((sum, p) => sum + p.amount, 0) + filled >= total;
 
-export type ActivityRow = { userId: string; due: number; paid: number; left: number };
+export type FillRow = { activityId: string; userId: string; amount: number; total: number; tagged: number };
 
 /**
- * Report for one activity: a row per participant or payer (due, tagged paid, left = due - paid),
- * plus totals. `left` is negative when someone paid extra for this activity.
+ * How much of each fill still counts: only the part of the shortfall (expenses - tagged payments) that
+ * payments haven't covered since. If fills exceed what's still needed, each is reduced by the same ratio,
+ * and the rest is free surplus again. Returns activityId -> userId -> effective amount.
  */
-export function activitySummary(split: ActivityDues, covered: ReturnType<typeof activityPaid>) {
-  const ids = new Set([...Object.keys(split.dues), ...Object.keys(covered.paid).filter((id) => covered.paid[id] !== 0)]);
+export function effectiveFills(rows: FillRow[]): Record<string, Record<string, number>> {
+  const byActivity = new Map<string, FillRow[]>();
+  for (const r of rows) byActivity.set(r.activityId, [...(byActivity.get(r.activityId) ?? []), r]);
+  const out: Record<string, Record<string, number>> = {};
+  for (const [activityId, fills] of byActivity) {
+    const need = Math.max(0, fills[0].total - fills[0].tagged);
+    const sum = fills.reduce((s, f) => s + f.amount, 0);
+    out[activityId] =
+      sum <= need
+        ? Object.fromEntries(fills.map((f) => [f.userId, f.amount]))
+        : distributeExact(need, fills.map((f) => ({ userId: f.userId, weight: f.amount })));
+  }
+  return out;
+}
+
+/** Surplus a member can still lend through fills: positive balance minus what their fills already cover. */
+export function availableSurplus(
+  byUser: Record<string, MemberBalance>,
+  effective: Record<string, Record<string, number>>,
+): Record<string, number> {
+  const used: Record<string, number> = {};
+  for (const fills of Object.values(effective)) for (const [u, v] of Object.entries(fills)) used[u] = (used[u] ?? 0) + v;
+  return Object.fromEntries(
+    Object.entries(byUser)
+      .map(([u, b]) => [u, Math.max(0, b.balance - (used[u] ?? 0))] as const)
+      .filter(([, v]) => v > 0),
+  );
+}
+
+/** The fill to add now: the shortfall (capped by surplus), split by each member's available surplus. */
+export function planFill(shortfall: number, available: Record<string, number>): Record<string, number> {
+  const pool = Object.values(available).reduce((s, v) => s + v, 0);
+  const take = Math.min(Math.max(0, shortfall), pool);
+  if (take === 0) return {};
+  const parts = distributeExact(
+    take,
+    Object.entries(available).map(([userId, weight]) => ({ userId, weight })),
+  );
+  return Object.fromEntries(Object.entries(parts).filter(([, v]) => v > 0));
+}
+
+export type ActivityRow = { userId: string; due: number; paid: number; fromSurplus: number; left: number };
+
+/**
+ * Report for one activity: a row per participant, payer or filler. `paid` = tagged payments plus the part of
+ * this activity their surplus covers (`fromSurplus`). `left` = due - paid, negative when someone paid extra.
+ */
+export function activitySummary(
+  split: ActivityDues,
+  covered: ReturnType<typeof activityPaid>,
+  fills: Record<string, number> = {},
+) {
+  const ids = new Set([
+    ...Object.keys(split.dues),
+    ...Object.keys(covered.paid).filter((id) => covered.paid[id] !== 0),
+    ...Object.keys(fills).filter((id) => fills[id] > 0),
+  ]);
   const rows: ActivityRow[] = [...ids].map((userId) => {
     const due = split.dues[userId] ?? 0;
-    const paid = covered.paid[userId] ?? 0;
-    return { userId, due, paid, left: due - paid };
+    const fromSurplus = fills[userId] ?? 0;
+    const paid = (covered.paid[userId] ?? 0) + fromSurplus;
+    return { userId, due, paid, fromSurplus, left: due - paid };
   });
   const outstanding = rows.reduce((s, r) => s + Math.max(r.left, 0), 0);
   const extra = rows.reduce((s, r) => s + Math.max(-r.left, 0), 0);
-  return { rows, outstanding, extra, collected: covered.intoGroup };
+  const filled = Object.values(fills).reduce((s, v) => s + v, 0);
+  return { rows, outstanding, extra, collected: covered.intoGroup, filled };
 }
 
+/**
+ * Who paid for one activity: only approved payments tagged with it count.
+ * A tagged payment to a member moves that amount from the payee to the payer.
+ * Untagged payments are general credit and only show in the overall balance.
+ */
 export function activityPaid(payments: { payerId: string; payeeId: string | null; amount: number }[]) {
   const paid: Record<string, number> = {};
   let intoGroup = 0;

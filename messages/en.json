@@ -173,7 +173,10 @@
     "expense_sealed": "This expense has a fixed amount and can't be changed.",
     "has_pending": "Approve or reject the pending expenses first.",
     "split_incomplete": "Every participant needs a due before closing.",
-    "payments_short": "Payments tagged to this activity don't cover its expenses yet."
+    "payments_short": "Payments tagged to this activity plus group budget fills don't cover its expenses yet.",
+    "nothing_to_fill": "Payments already cover this activity.",
+    "no_surplus": "No member has surplus to fill from.",
+    "try_again": "Something changed at the same time. Try again."
   },
   "reminder": {
     "send": "Remind",
@@ -236,5 +239,17 @@
     "reject": "Reject",
     "confirmReject": "Reject and delete this entry?",
     "memberHint": "Your entries count after an admin approves them."
+  },
+  "fill": {
+    "title": "Group budget",
+    "short": "Short by {amount}",
+    "action": "Fill from group budget",
+    "remove": "Remove fills",
+    "fromSurplusOf": "From {name}'s surplus",
+    "inclSurplus": "incl. {amount} from surplus",
+    "confirm": "Cover up to {amount} from the surplus of members who paid more than they owe? It is split by each one's surplus. Members who haven't paid still owe their dues.",
+    "confirmRemove": "Remove every fill on this activity? Their surplus becomes available again.",
+    "hint": "Members with surplus (credit) cover the gap for now. Balances don't change; members who haven't paid still owe. When tagged payments come in, the fill shrinks and their surplus frees up.",
+    "fromSurplusColumn": "From surplus"
   }
 }

@@ -9,8 +9,17 @@ import { Prisma } from "@prisma/client";
 import { f, formAction, toMinorOrThrow, toSplitColumns, withUpload } from "@/server/action";
 import { approvalFor } from "@/server/approval";
 import { removeFiles } from "@/server/storage";
-import { activityParticipants, closingDues, paymentsCover, splitActivity } from "@/lib/ledger";
-import { ledgerMembers, listEntries, loadActivity, loadGroup } from "@/server/queries";
+import {
+  activityParticipants,
+  availableSurplus,
+  closingDues,
+  effectiveFills,
+  paymentsCover,
+  planFill,
+  splitActivity,
+} from "@/lib/ledger";
+import { computeGroupLedger } from "@/server/group-ledger";
+import { ledgerMembers, listEntries, listFills, loadActivity, loadGroup } from "@/server/queries";
 
 /** One INSERT into activities. */
 export const createActivity = formAction(
@@ -127,15 +136,16 @@ export const sealExpense = formAction(z.object({ groupId: f.id, expenseId: f.id 
 /**
  * Close: freezes every participant's due as a fixed amount in activity_members, then sets closed_at,
  * in one transaction. Dues above the expenses are scaled down to match them (closingDues).
- * Refused while expenses are pending, a participant has no due, or tagged payments don't cover the expenses.
+ * Refused while expenses are pending, a participant has no due, or tagged payments plus fills don't cover the expenses.
  * Queries: group with members, the activity, its activity_members; then the upserts and one conditional UPDATE.
  */
 export const closeActivity = formAction(z.object({ groupId: f.id, activityId: f.id }), async ({ groupId, activityId }) => {
   const { user } = await actionMember(groupId, { admin: true });
-  const [group, activity, entries] = await Promise.all([
+  const [group, activity, entries, fills] = await Promise.all([
     loadGroup(groupId, user.id),
     loadActivity(groupId, activityId),
     listEntries(groupId, activityId),
+    listFills(groupId, activityId),
   ]);
   if (!group || !activity) throw new ActionError("not_found");
   if (activity.closed) throw new ActionError("activity_closed");
@@ -143,7 +153,8 @@ export const closeActivity = formAction(z.object({ groupId: f.id, activityId: f.
   const total = activity.expenses.reduce((sum, e) => sum + e.amount, 0);
   const split = splitActivity(total, activityParticipants({ ...activity, total }, ledgerMembers(group), entries));
   if (split.unset.length > 0) throw new ActionError("split_incomplete");
-  if (!paymentsCover(total, activity.payments.filter((p) => p.approvedAt))) throw new ActionError("payments_short");
+  const filled = Object.values(effectiveFills(fills)[activityId] ?? {}).reduce((sum, v) => sum + v, 0);
+  if (!paymentsCover(total, activity.payments.filter((p) => p.approvedAt), filled)) throw new ActionError("payments_short");
 
   await prisma.$transaction([
     ...Object.entries(closingDues(split)).map(([userId, due]) => {
@@ -162,4 +173,54 @@ export const closeActivity = formAction(z.object({ groupId: f.id, activityId: f.
 export const reopenActivity = formAction(z.object({ groupId: f.id, activityId: f.id }), async ({ groupId, activityId }) => {
   await actionMember(groupId, { admin: true });
   await prisma.activity.updateMany({ where: { id: activityId, groupId }, data: { closedAt: null } });
+});
+
+/**
+ * Covers this activity's shortfall (expenses - tagged payments - fills) from members' surplus, split by
+ * each member's available surplus. Saves a partial fill when the surplus is smaller than the shortfall.
+ * Queries: group with members, the activity, the group's fills, the 3 ledger queries (all in parallel); then one
+ * transaction that locks the group row, re-checks the fills haven't changed, and rewrites this activity's fills.
+ */
+export const fillFromBudget = formAction(z.object({ groupId: f.id, activityId: f.id }), async ({ groupId, activityId }) => {
+  const { user } = await actionMember(groupId, { admin: true });
+  const groupP = loadGroup(groupId, user.id);
+  const [group, activity, fills, ledger] = await Promise.all([
+    groupP,
+    loadActivity(groupId, activityId),
+    listFills(groupId),
+    computeGroupLedger(groupId, groupP),
+  ]);
+  if (!group || !activity || !ledger) throw new ActionError("not_found");
+  if (activity.closed) throw new ActionError("activity_closed");
+
+  const total = activity.expenses.reduce((sum, e) => sum + (e.approvedAt ? e.amount : 0), 0);
+  const tagged = activity.payments.reduce((sum, p) => sum + (p.approvedAt ? p.amount : 0), 0);
+  const effective = effectiveFills(fills);
+  const current = effective[activityId] ?? {};
+  const shortfall = total - tagged - Object.values(current).reduce((sum, v) => sum + v, 0);
+  if (shortfall <= 0) throw new ActionError("nothing_to_fill");
+  const plan = planFill(shortfall, availableSurplus(ledger.byUser, effective));
+  if (!Object.keys(plan).length) throw new ActionError("no_surplus");
+
+  const merged = { ...current };
+  for (const [userId, v] of Object.entries(plan)) merged[userId] = (merged[userId] ?? 0) + v;
+  const snapshot = fills.reduce((sum, f) => sum + f.amount, 0);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT id FROM groups WHERE id = ${groupId}::uuid FOR UPDATE`;
+    const now = await tx.activityFill.aggregate({ where: { groupId }, _sum: { amount: true }, _count: true });
+    if ((now._sum.amount ?? 0) !== snapshot || now._count !== fills.length) throw new ActionError("try_again");
+    await tx.activityFill.deleteMany({ where: { groupId, activityId } });
+    await tx.activityFill.createMany({
+      data: Object.entries(merged)
+        .filter(([, amount]) => amount > 0)
+        .map(([userId, amount]) => ({ activityId, groupId, userId, amount, createdById: user.id })),
+    });
+  });
+});
+
+/** Removes every fill on an open activity. One DELETE; the trigger refuses it once the activity is closed. */
+export const removeFills = formAction(z.object({ groupId: f.id, activityId: f.id }), async ({ groupId, activityId }) => {
+  await actionMember(groupId, { admin: true });
+  await prisma.activityFill.deleteMany({ where: { groupId, activityId } });
 });

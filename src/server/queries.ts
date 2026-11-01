@@ -1,7 +1,8 @@
 import "server-only";
 import { cache } from "react";
+import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
-import type { ActivityEntry, LedgerMember, SplitMethod, SplitRule } from "@/lib/ledger";
+import type { ActivityEntry, FillRow, LedgerMember, SplitMethod, SplitRule } from "@/lib/ledger";
 
 /** Every read the app does lives here. Each function is one round trip unless noted. */
 
@@ -215,4 +216,20 @@ export async function listPending(groupId: string) {
     prisma.payment.findMany({ where: { groupId, approvedAt: null }, select: paymentSelect, orderBy: { createdAt: "asc" } }),
   ]);
   return { expenses, payments };
+}
+
+/**
+ * Fills in the group (or one activity), each with its activity's approved expense total and tagged payments,
+ * so effectiveFills can tell how much still counts. Uses activity_fills(group_id) / PK, expenses(group_id, activity_id)
+ * and payments(activity_id). Fills are one row per member per activity, so this stays small.
+ */
+export function listFills(groupId: string, activityId?: string) {
+  return prisma.$queryRaw<FillRow[]>`
+    SELECT f.activity_id AS "activityId", f.user_id AS "userId", f.amount,
+      (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
+        WHERE e.group_id = f.group_id AND e.activity_id = f.activity_id AND e.approved_at IS NOT NULL)::int AS total,
+      (SELECT COALESCE(SUM(p.amount), 0) FROM payments p
+        WHERE p.activity_id = f.activity_id AND p.group_id = f.group_id AND p.approved_at IS NOT NULL)::int AS tagged
+    FROM activity_fills f
+    WHERE f.group_id = ${groupId}::uuid ${activityId ? Prisma.sql`AND f.activity_id = ${activityId}::uuid` : Prisma.empty}`;
 }

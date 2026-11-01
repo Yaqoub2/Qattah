@@ -1,5 +1,5 @@
 generator client {
-  provider      = "prisma-client-js"
+  provider        = "prisma-client-js"
   binaryTargets   = ["native", "rhel-openssl-3.0.x"]
   /// Relations load in the same SQL statement (one round trip) instead of one query per relation.
   previewFeatures = ["relationJoins"]
@@ -118,6 +118,7 @@ model GroupMember {
   paymentsMade     Payment[]        @relation("PaymentPayer")
   paymentsReceived Payment[]        @relation("PaymentPayee")
   reminders        Reminder[]
+  fills            ActivityFill[]
 
   @@id([groupId, userId])
   @@index([userId])
@@ -137,6 +138,7 @@ model Activity {
   members  ActivityMember[]
   expenses Expense[]
   payments Payment[]
+  fills    ActivityFill[]
 
   @@unique([id, groupId])
   @@index([groupId, startsOn(sort: Desc)])
@@ -178,6 +180,25 @@ model Expense {
 
   @@index([groupId, activityId])
   @@map("expenses")
+}
+
+/// Part of an activity's shortfall covered by a member's surplus (credit) through the group budget.
+/// Not a payment: balances don't change. It counts as that member's contribution to this activity,
+/// and only the part still needed (expenses - tagged payments) is effective.
+model ActivityFill {
+  activityId  String   @map("activity_id") @db.Uuid
+  groupId     String   @map("group_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  amount      Int
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  activity Activity    @relation(fields: [activityId, groupId], references: [id, groupId], onDelete: Cascade)
+  member   GroupMember @relation(fields: [groupId, userId], references: [groupId, userId], onDelete: Restrict)
+
+  @@id([activityId, userId])
+  @@index([groupId])
+  @@map("activity_fills")
 }
 
 /// The only record of money paid. payee null = paid into the group;
